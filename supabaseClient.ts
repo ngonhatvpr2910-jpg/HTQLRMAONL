@@ -1,53 +1,79 @@
-import { createClient } from '@supabase/supabase-js';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
-// URL và Key trực tiếp của dự án Supabase (Tuyệt đối không dùng window.location.origin hay proxy domain app/Vercel)
-const DIRECT_SUPABASE_URL = 'https://phzqzbkycxjsjjuivnfa.supabase.co';
-const DIRECT_SUPABASE_ANON_KEY = 'sb_publishable_YXa17yNODRSjW6Z-zTXTPw_6HlPxWXy';
+/**
+ * CẤU HÌNH KẾT NỐI TRỰC TIẾP ĐẾN SUPABASE CLOUD
+ * 
+ * QUY TẮC QUAN TRỌNG:
+ * 1. Sử dụng trực tiếp URL của Supabase từ import.meta.env.VITE_SUPABASE_URL.
+ * 2. TUYỆT ĐỐI KHÔNG dùng proxy qua URL của app (như window.location.origin, APP_URL, hay đường dẫn tương đối '/'),
+ *    vì điều đó sẽ khiến kết nối WebSocket Realtime (/realtime/v1/websocket) bị gọi nhầm vào domain máy chủ web (Vercel/Cloud Run)
+ *    gây ra lỗi "WebSocket connection failed: 404".
+ * 3. WebSocket Realtime bắt buộc phải trỏ trực tiếp đến máy chủ của Supabase (*.supabase.co).
+ */
 
-// Đọc trực tiếp từ biến môi trường Vite của máy trạm/client, dự phòng URL Supabase trực tiếp
+const DEFAULT_SUPABASE_URL = 'https://ceucxnrwzeaafqspdjyi.supabase.co';
+const DEFAULT_SUPABASE_ANON_KEY = 'sb_publishable_aFb2LCHTTx6Ic4EdWLQfKw_SG6bpSOu';
+
+// Đọc từ biến môi trường của Vite
 const envUrl = import.meta.env.VITE_SUPABASE_URL;
 const envKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
-// Chuẩn hóa chuỗi URL trực tiếp của Supabase (loại bỏ khoảng trắng và dấu gạch chéo cuối)
-export const supabaseUrl = (envUrl && envUrl.trim() !== '' ? envUrl : DIRECT_SUPABASE_URL)
-  .trim()
-  .replace(/\/+$/, '');
+// Kiểm tra và bảo đảm URL là địa chỉ tuyệt đối trực tiếp của Supabase
+const resolveDirectSupabaseUrl = (url: string | undefined): string => {
+  if (!url || typeof url !== 'string' || !url.trim()) {
+    return DEFAULT_SUPABASE_URL;
+  }
+  const cleanUrl = url.trim();
 
-export const supabaseAnonKey = (envKey && envKey.trim() !== '' ? envKey : DIRECT_SUPABASE_ANON_KEY)
-  .trim();
+  // Ngăn chặn việc cấu hình nhầm domain của ứng dụng (Vercel, Cloud Run, localhost, origin...)
+  if (
+    cleanUrl.startsWith('/') ||
+    cleanUrl.includes('localhost') ||
+    cleanUrl.includes('127.0.0.1') ||
+    cleanUrl.includes('vercel.app') ||
+    cleanUrl.includes('run.app')
+  ) {
+    console.warn(
+      `[SupabaseClient] Cảnh báo: URL cấu hình "${cleanUrl}" là domain của web app, không phải Supabase! ` +
+      `Đang tự động chuyển hướng kết nối trực tiếp đến "${DEFAULT_SUPABASE_URL}" để bảo vệ WebSocket Realtime khỏi lỗi 404.`
+    );
+    return DEFAULT_SUPABASE_URL;
+  }
 
-// Kiểm tra xem Supabase Client đã sẵn sàng kết nối trực tiếp chưa
-export const isSupabaseConfigured = Boolean(
-  supabaseUrl &&
-  supabaseAnonKey &&
-  supabaseUrl.startsWith('http')
-);
+  return cleanUrl;
+};
+
+export const supabaseUrl: string = resolveDirectSupabaseUrl(envUrl);
+export const supabaseAnonKey: string = (envKey && envKey.trim()) ? envKey.trim() : DEFAULT_SUPABASE_ANON_KEY;
 
 /**
- * Supabase Client Singleton:
- * Kết nối TRỰC TIẾP đến endpoint Supabase (https://<project-ref>.supabase.co).
- * 
- * LƯU Ý BẢO MẬT & REALTIME:
- * - TUYỆT ĐỐI KHÔNG dùng proxy qua URL của app (như window.location.origin hay APP_URL)
- * - Khi kết nối trực tiếp, WebSocket Realtime sẽ kết nối thẳng tới:
- *   wss://phzqzbkycxjsjjuivnfa.supabase.co/realtime/v1/websocket
- * - Tránh hoàn toàn lỗi "WebSocket connection failed: 404" do Vercel/reverse-proxy chặn hoặc không xử lý /realtime
+ * Kiểm tra cấu hình Supabase hợp lệ
  */
-export const supabase = createClient(
-  supabaseUrl,
-  supabaseAnonKey,
-  {
-    auth: {
-      persistSession: true,
-      autoRefreshToken: true,
-      detectSessionInUrl: true,
+export const isSupabaseConfigured = (): boolean => {
+  return Boolean(
+    supabaseUrl &&
+    supabaseAnonKey &&
+    supabaseUrl.startsWith('https://') &&
+    supabaseUrl.includes('supabase.co')
+  );
+};
+
+/**
+ * SINGLETON INSTANCE:
+ * Khởi tạo duy nhất 1 Supabase client cho toàn bộ ứng dụng và các kênh Realtime.
+ * Đảm bảo các hàm supabase.channel(...) luôn tái sử dụng đúng kết nối WebSocket này.
+ */
+export const supabase: SupabaseClient = createClient(supabaseUrl, supabaseAnonKey, {
+  auth: {
+    persistSession: false,
+    autoRefreshToken: false,
+    detectSessionInUrl: false,
+  },
+  realtime: {
+    params: {
+      eventsPerSecond: 10,
     },
-    realtime: {
-      params: {
-        eventsPerSecond: 10,
-      },
-    },
-  }
-);
+  },
+});
 
 export default supabase;

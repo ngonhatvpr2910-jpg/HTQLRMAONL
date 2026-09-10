@@ -1,6 +1,6 @@
 {
-  "name": "Hệ thống Báo cáo Dừng Line Sản xuất",
-  "description": "Hệ thống báo cáo và thống kê trực quan thời gian dừng Line sản xuất, tích hợp Supabase Cloud Realtime, biểu đồ phân tích và xuất Excel.",
+  "name": "RMA Rework Flow",
+  "description": "Hệ thống quản lý quy trình Rework hàng lỗi RMA qua 6 bước tiêu chuẩn.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

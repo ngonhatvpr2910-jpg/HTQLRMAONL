@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode, useCallback } from 'react';
-import { Ticket, WorkflowStep, LotInfo } from './types';
+import { Ticket, WorkflowStep, LotInfo, Worker } from './types';
 import {
   fetchTicketsFromDB,
   fetchLotsFromDB,
@@ -30,7 +30,12 @@ interface TicketContextType {
   moveTicket: (id: string, newStatus: WorkflowStep) => Promise<void>;
   moveLot: (lotNumber: string, currentStatus: WorkflowStep, newStatus: WorkflowStep) => Promise<void>;
   deleteTicket: (id: string) => Promise<void>;
-  importData: (data: { tickets: Ticket[]; lots: LotInfo[] }) => Promise<void>;
+  importData: (data: {
+    tickets?: Ticket[];
+    lots?: LotInfo[];
+    workers?: Worker[];
+    mode?: 'merge' | 'replace';
+  }) => Promise<{ success: boolean; ticketsSynced: number; lotsSynced: number; workersSynced: number }>;
 }
 
 const TicketContext = createContext<TicketContextType | undefined>(undefined);
@@ -236,16 +241,48 @@ export const TicketProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     }
   };
 
-  // Nhập dữ liệu sao lưu
-  const importData = async (data: { tickets: Ticket[]; lots: LotInfo[] }): Promise<void> => {
-    if (data.tickets) setTickets(data.tickets);
-    if (data.lots) setLots(data.lots);
+  // Nhập khẩu và đồng bộ dữ liệu (từ file cũ hoặc backup)
+  const importData = async (data: {
+    tickets?: Ticket[];
+    lots?: LotInfo[];
+    workers?: Worker[];
+    mode?: 'merge' | 'replace';
+  }): Promise<{ success: boolean; ticketsSynced: number; lotsSynced: number; workersSynced: number }> => {
+    const mode = data.mode || 'merge';
+
+    if (data.tickets) {
+      if (mode === 'replace') {
+        setTickets(data.tickets);
+      } else {
+        setTickets(prev => {
+          const map = new Map<string, Ticket>();
+          prev.forEach(t => map.set(t.id, t));
+          data.tickets!.forEach(t => map.set(t.id, { ...map.get(t.id), ...t }));
+          return Array.from(map.values());
+        });
+      }
+    }
+
+    if (data.lots) {
+      if (mode === 'replace') {
+        setLots(data.lots);
+      } else {
+        setLots(prev => {
+          const map = new Map<string, LotInfo>();
+          prev.forEach(l => map.set(l.lotNumber, l));
+          data.lots!.forEach(l => map.set(l.lotNumber, { ...map.get(l.lotNumber), ...l }));
+          return Array.from(map.values());
+        });
+      }
+    }
 
     try {
-      await importDataToDB(data);
+      const result = await importDataToDB(data);
+      return result;
     } catch (err: any) {
       console.error('Lỗi khi khôi phục dữ liệu:', err);
       setError(err?.message || 'Lỗi khi khôi phục dữ liệu');
+      throw err;
     }
   };
 

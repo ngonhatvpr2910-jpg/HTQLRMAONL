@@ -9,7 +9,8 @@ import ScanActionModal from './ScanActionModal';
 import GenerateLotQRModal from './GenerateLotQRModal';
 import ColumnScanner from './ColumnScanner';
 import WorkersModal from './WorkersModal';
-import { Plus, QrCode, Download, Search, Printer, ArrowRight, Upload, Database, ChevronDown, ChevronRight, Folder, Users, FileSpreadsheet } from 'lucide-react';
+import DataSyncModal from './DataSyncModal';
+import { Plus, QrCode, Download, Search, Printer, ArrowRight, Upload, Database, ChevronDown, ChevronRight, Folder, Users, FileSpreadsheet, RefreshCw } from 'lucide-react';
 import { motion } from 'motion/react';
 
 const ModelFolder: React.FC<{ 
@@ -112,6 +113,7 @@ export default function Dashboard() {
   const [isScannerOpen, setIsScannerOpen] = useState(false);
   const [isGenerateLotQROpen, setIsGenerateLotQROpen] = useState(false);
   const [isWorkersOpen, setIsWorkersOpen] = useState(false);
+  const [isSyncModalOpen, setIsSyncModalOpen] = useState(false);
   const [createTicketTab, setCreateTicketTab] = useState<'single' | 'excel'>('single');
   const [selectedTicketId, setSelectedTicketId] = useState<string | null>(null);
   const [scannedTicketId, setScannedTicketId] = useState<string | null>(null);
@@ -280,11 +282,15 @@ export default function Dashboard() {
               <span className="hidden sm:inline whitespace-nowrap">Nhân sự</span>
             </button>
 
-            <label className="flex items-center space-x-2 bg-amber-600 hover:bg-amber-700 text-white px-3 py-2 rounded-lg text-xs font-bold transition-all shadow-sm cursor-pointer" title="Phục hồi dữ liệu">
+            <button 
+              onClick={() => setIsSyncModalOpen(true)}
+              className="flex items-center space-x-2 bg-amber-600 hover:bg-amber-700 text-white px-3 py-2 rounded-lg text-xs font-bold transition-all shadow-sm" 
+              title="Đồng bộ & Nạp file dữ liệu cũ (.json / .xlsx / .csv)"
+              id="btn-open-sync-modal"
+            >
               <Upload className="w-4 h-4" />
-              <span className="hidden lg:inline whitespace-nowrap">Phục hồi</span>
-              <input type="file" accept=".json" onChange={handleRestore} className="hidden" />
-            </label>
+              <span className="hidden sm:inline whitespace-nowrap">Đồng bộ Dữ liệu Cũ</span>
+            </button>
 
             <button 
               onClick={() => {
@@ -455,6 +461,10 @@ export default function Dashboard() {
       <WorkersModal
         isOpen={isWorkersOpen}
         onClose={() => setIsWorkersOpen(false)}
+      />
+      <DataSyncModal
+        isOpen={isSyncModalOpen}
+        onClose={() => setIsSyncModalOpen(false)}
       />
     </div>
   );
