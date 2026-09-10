@@ -1,823 +1,1016 @@
+import { DowntimeReport, ReasonCategory, Worker } from './types';
+import { Product, INITIAL_DOWNTIME_REPORTS, PRODUCTS, INITIAL_WORKERS } from './data';
 import { supabase, isSupabaseConfigured } from './supabaseClient';
-import { Ticket, LotInfo, WorkflowStep, Worker } from './types';
 
-const STORAGE_KEY = 'rma_tickets_data';
-const LOTS_STORAGE_KEY = 'rma_lots_data';
-const WORKERS_STORAGE_KEY = 'rma_workers_data';
+const LOCAL_STORAGE_REPORTS_KEY = 'sunhouse_downtime_reports';
+const LOCAL_STORAGE_PRODUCTS_KEY = 'sunhouse_products';
+const LOCAL_STORAGE_WORKERS_KEY = 'sunhouse_workers';
 
-// ================= TỐI ƯU CỘT TRUY VẤN (TIẾT KIỆM EGRESS BĂNG THÔNG) =================
-// Chỉ select các cột thực sự hiển thị trên giao diện, loại bỏ việc select * gây tốn bandwidth
-export const WORKER_SELECT_COLUMNS = [
-  'id',
-  'name',
-  'code',
-  'role',
-  'department',
-  'phone',
-  'email',
-  'active',
-  'created_at',
-  'updated_at',
-].join(', ');
+// ============================================================================
+// TỐI ƯU HÓA EGRESS: Chỉ định đích danh các cột cần thiết cho giao diện
+// Tuyệt đối không dùng SELECT * để tiết kiệm tối đa băng thông cho gói Free.
+// ============================================================================
+export const DOWNTIME_COLUMNS = 
+  'id, date, shift, line, equipment, start_time, end_time, duration, reason_category, details, solution, pic, status, created_at, product_name, product_unit_price, standard_rate' as const;
 
-export const TICKET_SELECT_COLUMNS = [
-  'id',
-  'product_name',
-  'product_code',
-  'lot_number',
-  'serial_number',
-  'quantity',
-  'issue_description',
-  'status',
-  'created_at',
-  'updated_at',
-  'imei',
-  'evaluation_notes',
-  'damaged_parts',
-  'quotation_amount',
-  'rework_notes',
-  'return_location',
-].join(', ');
+export const PRODUCT_COLUMNS = 
+  'name, line, unit_price, standard_rate' as const;
 
-export const LOT_SELECT_COLUMNS = [
-  'lot_number',
-  'product_name',
-  'product_code',
-  'created_at',
-].join(', ');
+export const WORKER_COLUMNS = 
+  'id, worker_code, full_name, department, status' as const;
 
-// Cột tối ưu cho các bảng lịch sử / nhật ký giao dịch (transactions, labels)
-export const TRANSACTION_SELECT_COLUMNS = [
-  'id',
-  'ticket_id',
-  'action',
-  'from_status',
-  'to_status',
-  'created_at',
-].join(', ');
+// Bản đồ chuyển đổi các nhóm nguyên nhân cũ sang mô hình 4M chuẩn hóa
+const OLD_CATEGORY_MAP: Record<string, ReasonCategory> = {
+  'Sự cố máy móc/thiết bị': 'Máy móc/Thiết bị',
+  'Thiếu nguyên vật liệu': 'Nguyên vật liệu',
+  'Thay đổi mã hàng/Gá đặt': 'Phương pháp/Quy trình',
+  'Chờ kiểm tra chất lượng': 'Phương pháp/Quy trình',
+  'Sự cố vận hành/Nhân sự': 'Con người',
+  'Sự cố điện/nước/khí nén': 'Máy móc/Thiết bị',
+  'Lý do khác': 'Con người',
+};
 
-// Mock initial data khi lần đầu chạy và chưa có dữ liệu
-const INITIAL_TICKETS: Ticket[] = [
-  {
-    id: 'RMA-1001',
-    productName: 'Máy hút bụi X1',
-    lotNumber: '50-11-2023',
-    serialNumber: 'SN992817',
-    quantity: 50,
-    issueDescription: 'Động cơ có tiếng kêu lạ, lực hút yếu.',
-    status: WorkflowStep.RMA_IN,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  },
-  {
-    id: 'RMA-1002',
-    productName: 'Nồi cơm điện C2',
-    lotNumber: '120-12-2023',
-    serialNumber: 'SN112233',
-    quantity: 120,
-    issueDescription: 'Không lên nguồn',
-    status: WorkflowStep.EVALUATION,
-    evaluationNotes: 'Cháy cầu chì nhiệt, hỏng bo mạch nguồn.',
-    damagedParts: ['Cầu chì nhiệt', 'Bo mạch nguồn chính'],
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
+export const normalizeReasonCategory = (category: string): ReasonCategory => {
+  if (OLD_CATEGORY_MAP[category]) {
+    return OLD_CATEGORY_MAP[category];
   }
-];
-
-// Helper lưu LocalStorage làm cache offline
-export const getLocalTickets = (): Ticket[] => {
-  const saved = localStorage.getItem(STORAGE_KEY);
-  if (saved) {
-    try {
-      return JSON.parse(saved);
-    } catch (e) {
-      console.error('Failed to parse local tickets', e);
-    }
+  const valid: ReasonCategory[] = [
+    'Con người',
+    'Máy móc/Thiết bị',
+    'Nguyên vật liệu',
+    'Phương pháp/Quy trình',
+  ];
+  if (valid.includes(category as ReasonCategory)) {
+    return category as ReasonCategory;
   }
-  return INITIAL_TICKETS;
+  return 'Máy móc/Thiết bị';
 };
 
-export const setLocalTickets = (tickets: Ticket[]) => {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(tickets));
-};
+// ==========================================
+// DATA CONVERSION HELPERS (Database <-> Model)
+// ==========================================
 
-export const getLocalLots = (): LotInfo[] => {
-  const saved = localStorage.getItem(LOTS_STORAGE_KEY);
-  if (saved) {
-    try {
-      return JSON.parse(saved);
-    } catch (e) {
-      console.error('Failed to parse local lots', e);
-    }
-  }
-  return [];
-};
-
-export const setLocalLots = (lots: LotInfo[]) => {
-  localStorage.setItem(LOTS_STORAGE_KEY, JSON.stringify(lots));
-};
-
-// ================= Ánh xạ 2 chiều DB (snake_case) <-> Frontend (camelCase) =================
-export const mapRowToTicket = (row: any): Ticket => {
+export const mapDbRowToReport = (row: any): DowntimeReport => {
   return {
-    id: row.id,
-    productName: row.product_name ?? row.productName ?? '',
-    productCode: row.product_code ?? row.productCode ?? undefined,
-    lotNumber: row.lot_number ?? row.lotNumber ?? '',
-    serialNumber: row.serial_number ?? row.serialNumber ?? '',
-    quantity: Number(row.quantity ?? 1),
-    issueDescription: row.issue_description ?? row.issueDescription ?? '',
-    status: (row.status as WorkflowStep) || WorkflowStep.RMA_IN,
+    id: String(row.id),
+    date: String(row.date || new Date().toISOString().split('T')[0]),
+    shift: row.shift || 'Ca 1',
+    line: row.line || 'Dây chuyền LR RO',
+    equipment: row.equipment || '',
+    startTime: row.start_time ?? row.startTime ?? '00:00',
+    endTime: row.end_time ?? row.endTime ?? '00:00',
+    duration: Number(row.duration || 0),
+    reasonCategory: normalizeReasonCategory(row.reason_category ?? row.reasonCategory ?? ''),
+    details: row.details || '',
+    solution: row.solution || '',
+    pic: row.pic || '',
+    status: row.status === 'Đang xử lý' ? 'Đang xử lý' : 'Đã khắc phục',
     createdAt: row.created_at ?? row.createdAt ?? new Date().toISOString(),
-    updatedAt: row.updated_at ?? row.updatedAt ?? new Date().toISOString(),
-    imei: row.imei ?? undefined,
-    evaluationNotes: row.evaluation_notes ?? row.evaluationNotes ?? undefined,
-    damagedParts: Array.isArray(row.damaged_parts)
-      ? row.damaged_parts
-      : Array.isArray(row.damagedParts)
-      ? row.damagedParts
-      : undefined,
-    quotationAmount: row.quotation_amount !== undefined ? Number(row.quotation_amount) : (row.quotationAmount !== undefined ? Number(row.quotationAmount) : undefined),
-    reworkNotes: row.rework_notes ?? row.reworkNotes ?? undefined,
-    returnLocation: row.return_location ?? row.returnLocation ?? undefined,
+    productName: row.product_name ?? row.productName ?? '',
+    productUnitPrice: Number(row.product_unit_price ?? row.productUnitPrice ?? 0),
+    standardRate: Number(row.standard_rate ?? row.standardRate ?? 0),
   };
 };
 
-export const mapTicketToRow = (ticket: Partial<Ticket>): any => {
+export const mapReportToDbRow = (report: Partial<DowntimeReport>) => {
   const row: Record<string, any> = {};
-  if (ticket.id !== undefined) row.id = ticket.id;
-  if (ticket.productName !== undefined) row.product_name = ticket.productName;
-  if (ticket.productCode !== undefined) row.product_code = ticket.productCode;
-  if (ticket.lotNumber !== undefined) row.lot_number = ticket.lotNumber;
-  if (ticket.serialNumber !== undefined) row.serial_number = ticket.serialNumber;
-  if (ticket.quantity !== undefined) row.quantity = ticket.quantity;
-  if (ticket.issueDescription !== undefined) row.issue_description = ticket.issueDescription;
-  if (ticket.status !== undefined) row.status = ticket.status;
-  if (ticket.createdAt !== undefined) row.created_at = ticket.createdAt;
-  if (ticket.updatedAt !== undefined) row.updated_at = ticket.updatedAt;
-  if (ticket.imei !== undefined) row.imei = ticket.imei;
-  if (ticket.evaluationNotes !== undefined) row.evaluation_notes = ticket.evaluationNotes;
-  if (ticket.damagedParts !== undefined) row.damaged_parts = ticket.damagedParts;
-  if (ticket.quotationAmount !== undefined) row.quotation_amount = ticket.quotationAmount;
-  if (ticket.reworkNotes !== undefined) row.rework_notes = ticket.reworkNotes;
-  if (ticket.returnLocation !== undefined) row.return_location = ticket.returnLocation;
+  if (report.id !== undefined) row.id = report.id;
+  if (report.date !== undefined) row.date = report.date;
+  if (report.shift !== undefined) row.shift = report.shift;
+  if (report.line !== undefined) row.line = report.line;
+  if (report.equipment !== undefined) row.equipment = report.equipment;
+  if (report.startTime !== undefined) row.start_time = report.startTime;
+  if (report.endTime !== undefined) row.end_time = report.endTime;
+  if (report.duration !== undefined) row.duration = report.duration;
+  if (report.reasonCategory !== undefined) row.reason_category = report.reasonCategory;
+  if (report.details !== undefined) row.details = report.details;
+  if (report.solution !== undefined) row.solution = report.solution;
+  if (report.pic !== undefined) row.pic = report.pic;
+  if (report.status !== undefined) row.status = report.status;
+  if (report.createdAt !== undefined) row.created_at = report.createdAt;
+  if (report.productName !== undefined) row.product_name = report.productName;
+  if (report.productUnitPrice !== undefined) row.product_unit_price = report.productUnitPrice;
+  if (report.standardRate !== undefined) row.standard_rate = report.standardRate;
   return row;
 };
 
-export const mapRowToLot = (row: any): LotInfo => {
+export const mapDbRowToProduct = (row: any): Product => {
   return {
-    lotNumber: row.lot_number ?? row.lotNumber ?? '',
-    productName: row.product_name ?? row.productName ?? '',
-    productCode: row.product_code ?? row.productCode ?? '',
-    createdAt: row.created_at ?? row.createdAt ?? new Date().toISOString(),
+    name: String(row.name || ''),
+    line: row.line || 'Dây chuyền LR RO',
+    unitPrice: Number(row.unit_price ?? row.unitPrice ?? 0),
+    standardRate: Number(row.standard_rate ?? row.standardRate ?? 0),
   };
 };
 
-export const mapLotToRow = (lot: LotInfo): any => {
+export const mapProductToDbRow = (product: Product) => {
   return {
-    lot_number: lot.lotNumber,
-    product_name: lot.productName,
-    product_code: lot.productCode,
-    created_at: lot.createdAt,
+    name: product.name,
+    line: product.line,
+    unit_price: product.unitPrice,
+    standard_rate: product.standardRate,
   };
 };
 
-// ================= CÁC HÀM ASYNC FETCHING DỮ LIỆU ĐƯỢC TỐI ƯU =================
+// ==========================================
+// LOCAL STORAGE CACHE HELPERS (Dự phòng offline)
+// ==========================================
 
-/**
- * Lấy danh sách phiếu RMA từ Supabase với cột cụ thể và giới hạn số lượng để tiết kiệm Egress
- * Mặc định lấy 100 phiếu gần nhất (đáp ứng tiêu chuẩn gói Free)
- */
-export const fetchTicketsFromDB = async (limit: number = 100): Promise<Ticket[]> => {
-  if (isSupabaseConfigured()) {
-    try {
-      const { data, error } = await supabase
-        .from('tickets')
-        .select(TICKET_SELECT_COLUMNS)
-        .order('created_at', { ascending: false })
-        .limit(limit);
-
-      if (error) {
-        console.warn('Lỗi khi fetch tickets từ Supabase, chuyển sang bộ nhớ tạm:', error.message);
-        return getLocalTickets();
-      }
-
-      if (data) {
-        const mapped = data.map(mapRowToTicket);
-        setLocalTickets(mapped);
-        return mapped;
-      }
-    } catch (err) {
-      console.error('Lỗi ngoại lệ khi kết nối Supabase:', err);
-      return getLocalTickets();
-    }
+const getLocalReports = (): DowntimeReport[] => {
+  try {
+    const raw = localStorage.getItem(LOCAL_STORAGE_REPORTS_KEY);
+    if (!raw) return INITIAL_DOWNTIME_REPORTS;
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.map(mapDbRowToReport) : INITIAL_DOWNTIME_REPORTS;
+  } catch {
+    return INITIAL_DOWNTIME_REPORTS;
   }
-  return getLocalTickets();
 };
 
-/**
- * Lấy danh sách lô hàng với cột cụ thể và giới hạn 100 bản ghi
- */
-export const fetchLotsFromDB = async (limit: number = 100): Promise<LotInfo[]> => {
-  if (isSupabaseConfigured()) {
-    try {
-      const { data, error } = await supabase
-        .from('lots')
-        .select(LOT_SELECT_COLUMNS)
-        .order('created_at', { ascending: false })
-        .limit(limit);
-
-      if (error) {
-        console.warn('Lỗi khi fetch lots từ Supabase, chuyển sang bộ nhớ tạm:', error.message);
-        return getLocalLots();
-      }
-
-      if (data) {
-        const mapped = data.map(mapRowToLot);
-        setLocalLots(mapped);
-        return mapped;
-      }
-    } catch (err) {
-      console.error('Lỗi ngoại lệ khi fetch lots:', err);
-      return getLocalLots();
-    }
+const setLocalReports = (reports: DowntimeReport[]) => {
+  try {
+    localStorage.setItem(LOCAL_STORAGE_REPORTS_KEY, JSON.stringify(reports));
+  } catch (e) {
+    console.warn('Không thể lưu reports vào localStorage:', e);
   }
-  return getLocalLots();
 };
 
-/**
- * Lấy nhật ký giao dịch / nhãn in với giới hạn 100 bản ghi mới nhất
- */
-export const fetchTransactionsFromDB = async (limit: number = 100): Promise<any[]> => {
-  if (isSupabaseConfigured()) {
-    try {
-      const { data, error } = await supabase
-        .from('transactions')
-        .select(TRANSACTION_SELECT_COLUMNS)
-        .order('created_at', { ascending: false })
-        .limit(limit);
-
-      if (!error && data) {
-        return data;
-      }
-    } catch (err) {
-      // Bảng transactions là bảng tùy chọn
-    }
+const getLocalProducts = (): Product[] => {
+  try {
+    const raw = localStorage.getItem(LOCAL_STORAGE_PRODUCTS_KEY);
+    if (!raw) return PRODUCTS;
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.map(mapDbRowToProduct) : PRODUCTS;
+  } catch {
+    return PRODUCTS;
   }
-  return [];
 };
 
-/**
- * Thêm một phiếu RMA mới vào Supabase
- */
-export const createTicketInDB = async (
-  ticketData: Omit<Ticket, 'id' | 'status' | 'createdAt' | 'updatedAt'>,
-  existingTickets: Ticket[]
-): Promise<Ticket> => {
-  const now = new Date();
-  const year = now.getFullYear().toString().slice(-2);
-  const month = (now.getMonth() + 1).toString().padStart(2, '0');
-  const datePrefix = `${year}${month}`;
+const setLocalProducts = (products: Product[]) => {
+  try {
+    localStorage.setItem(LOCAL_STORAGE_PRODUCTS_KEY, JSON.stringify(products));
+  } catch (e) {
+    console.warn('Không thể lưu products vào localStorage:', e);
+  }
+};
 
-  // Tìm các phiếu trong tháng để cấp số thứ tự tiếp theo
-  const thisMonthTickets = existingTickets.filter(t => t.id.startsWith(`RMA-${datePrefix}`));
-  const nextNumber = (thisMonthTickets.length + 1).toString().padStart(4, '0');
-
-  const newTicket: Ticket = {
-    ...ticketData,
-    id: `RMA-${datePrefix}-${nextNumber}`,
-    status: WorkflowStep.RMA_IN,
-    createdAt: now.toISOString(),
-    updatedAt: now.toISOString(),
+export const mapDbRowToWorker = (row: any): Worker => {
+  const full_name = String(row.full_name || row.name || '');
+  const worker_code = String(row.worker_code || row.code || '');
+  return {
+    id: String(row.id || ''),
+    worker_code,
+    full_name,
+    name: full_name,
+    code: worker_code,
+    department: String(row.department || 'Dây chuyền LR RO'),
+    role: row.role || 'Kỹ thuật viên',
+    phone: row.phone || '',
+    status: row.status || 'Đang làm việc',
+    created_at: row.created_at || new Date().toISOString(),
   };
-
-  if (isSupabaseConfigured()) {
-    try {
-      const { error } = await supabase
-        .from('tickets')
-        .insert([mapTicketToRow(newTicket)]);
-
-      if (error) {
-        console.error('Lỗi khi thêm phiếu vào Supabase:', error.message);
-      }
-    } catch (err) {
-      console.error('Lỗi ngoại lệ khi thêm ticket:', err);
-    }
-  }
-
-  // Cập nhật local cache
-  const current = getLocalTickets();
-  setLocalTickets([newTicket, ...current]);
-
-  return newTicket;
 };
+
+export const mapWorkerToDbRow = (worker: Partial<Worker>) => {
+  const row: Record<string, any> = {};
+  if (worker.id !== undefined) row.id = worker.id;
+  if (worker.worker_code !== undefined) row.worker_code = worker.worker_code;
+  else if (worker.code !== undefined) row.worker_code = worker.code;
+
+  if (worker.full_name !== undefined) row.full_name = worker.full_name;
+  else if (worker.name !== undefined) row.full_name = worker.name;
+
+  if (worker.department !== undefined) row.department = worker.department;
+  if (worker.status !== undefined) row.status = worker.status;
+  return row;
+};
+
+const getLocalWorkers = (): Worker[] => {
+  try {
+    const raw = localStorage.getItem(LOCAL_STORAGE_WORKERS_KEY);
+    if (!raw) return INITIAL_WORKERS;
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.map(mapDbRowToWorker) : INITIAL_WORKERS;
+  } catch {
+    return INITIAL_WORKERS;
+  }
+};
+
+const setLocalWorkers = (workers: Worker[]) => {
+  try {
+    localStorage.setItem(LOCAL_STORAGE_WORKERS_KEY, JSON.stringify(workers));
+  } catch (e) {
+    console.warn('Không thể lưu workers vào localStorage:', e);
+  }
+};
+
+// ============================================================================
+// ASYNC DOWNTIME REPORTS CRUD (Tối ưu hóa Egress với .select() cụ thể và .limit(100))
+// ============================================================================
 
 /**
- * Thêm hàng loạt phiếu RMA (ví dụ khi Upfile Excel) vào Supabase
+ * Lấy danh sách báo cáo dừng Line gần nhất từ Supabase.
+ * MẶC ĐỊNH GIỚI HẠN .limit(100) để tiết kiệm tối đa Egress cho gói Supabase Free,
+ * không load hàng ngàn bản ghi cũ không cần thiết về máy trạm.
  */
-export const batchCreateTicketsInDB = async (
-  newTickets: Ticket[]
-): Promise<void> => {
-  if (newTickets.length === 0) return;
+export async function fetchReports(limit: number = 100): Promise<DowntimeReport[]> {
+  if (!isSupabaseConfigured) {
+    return getLocalReports().slice(0, limit);
+  }
 
-  if (isSupabaseConfigured()) {
-    try {
-      const rows = newTickets.map(mapTicketToRow);
-      const { error } = await supabase.from('tickets').upsert(rows, { onConflict: 'id' });
-      if (error) {
-        console.error('Lỗi khi batch upsert tickets lên Supabase:', error.message);
-        throw error;
-      }
-    } catch (err) {
-      console.error('Lỗi ngoại lệ khi batchCreateTicketsInDB:', err);
-      throw err;
+  try {
+    let query = supabase
+      .from('downtime_reports')
+      .select(DOWNTIME_COLUMNS)
+      .order('date', { ascending: false })
+      .order('start_time', { ascending: false });
+
+    if (limit > 0) {
+      query = query.limit(limit);
     }
-  }
 
-  // Cập nhật local cache
-  const current = getLocalTickets();
-  const existingIds = new Set(newTickets.map(t => t.id));
-  const filtered = current.filter(t => !existingIds.has(t.id));
-  setLocalTickets([...newTickets, ...filtered]);
-};
+    const { data, error } = await query;
 
-/**
- * Cập nhật thông tin phiếu RMA trên Supabase
- */
-export const updateTicketInDB = async (
-  id: string,
-  updates: Partial<Ticket>
-): Promise<void> => {
-  const updatedAt = new Date().toISOString();
-  const fullUpdates = { ...updates, updatedAt };
-
-  if (isSupabaseConfigured()) {
-    try {
-      const { error } = await supabase
-        .from('tickets')
-        .update(mapTicketToRow(fullUpdates))
-        .eq('id', id);
-
-      if (error) {
-        console.error(`Lỗi khi cập nhật phiếu ${id} trên Supabase:`, error.message);
-      }
-    } catch (err) {
-      console.error('Lỗi ngoại lệ khi update ticket:', err);
+    if (error) {
+      console.warn('Lỗi khi truy vấn Supabase downtime_reports, sử dụng bộ nhớ cục bộ:', error.message);
+      return getLocalReports().slice(0, limit);
     }
-  }
 
-  // Cập nhật local cache
-  const current = getLocalTickets();
-  const updated = current.map(t => (t.id === id ? { ...t, ...fullUpdates } : t));
-  setLocalTickets(updated);
-};
-
-/**
- * Chuyển trạng thái 1 phiếu RMA
- */
-export const moveTicketInDB = async (
-  id: string,
-  newStatus: WorkflowStep
-): Promise<void> => {
-  await updateTicketInDB(id, { status: newStatus });
-};
-
-/**
- * Chuyển trạng thái toàn bộ phiếu thuộc cùng 1 lô
- */
-export const moveLotInDB = async (
-  lotNumber: string,
-  currentStatus: WorkflowStep,
-  newStatus: WorkflowStep
-): Promise<void> => {
-  const updatedAt = new Date().toISOString();
-
-  if (isSupabaseConfigured()) {
-    try {
-      const { error } = await supabase
-        .from('tickets')
-        .update({ status: newStatus, updated_at: updatedAt })
-        .eq('lot_number', lotNumber)
-        .eq('status', currentStatus);
-
-      if (error) {
-        console.error(`Lỗi khi chuyển lô ${lotNumber} trên Supabase:`, error.message);
+    if (!data || data.length === 0) {
+      const local = getLocalReports();
+      if (local.length > 0) {
+        await bulkImportReports(local).catch(() => {});
+        return local.slice(0, limit);
       }
-    } catch (err) {
-      console.error('Lỗi ngoại lệ khi move lot:', err);
+      return [];
     }
+
+    const formatted = data.map(mapDbRowToReport);
+    setLocalReports(formatted);
+    return formatted;
+  } catch (err) {
+    console.error('Lỗi ngoại lệ khi fetchReports:', err);
+    return getLocalReports().slice(0, limit);
   }
-
-  // Cập nhật local cache
-  const current = getLocalTickets();
-  const updated = current.map(t =>
-    t.lotNumber === lotNumber && t.status === currentStatus
-      ? { ...t, status: newStatus, updatedAt }
-      : t
-  );
-  setLocalTickets(updated);
-};
-
-/**
- * Xóa 1 phiếu RMA khỏi Supabase
- */
-export const deleteTicketFromDB = async (id: string): Promise<void> => {
-  if (isSupabaseConfigured()) {
-    try {
-      const { error } = await supabase
-        .from('tickets')
-        .delete()
-        .eq('id', id);
-
-      if (error) {
-        console.error(`Lỗi khi xóa phiếu ${id} trên Supabase:`, error.message);
-      }
-    } catch (err) {
-      console.error('Lỗi ngoại lệ khi delete ticket:', err);
-    }
-  }
-
-  const current = getLocalTickets();
-  setLocalTickets(current.filter(t => t.id !== id));
-};
-
-/**
- * Đăng ký thông tin lô hàng vào bảng lots
- */
-export const registerLotInDB = async (lot: LotInfo): Promise<void> => {
-  if (isSupabaseConfigured()) {
-    try {
-      const { error } = await supabase
-        .from('lots')
-        .upsert([mapLotToRow(lot)], { onConflict: 'lot_number' });
-
-      if (error) {
-        console.error(`Lỗi khi đăng ký lô ${lot.lotNumber} trên Supabase:`, error.message);
-      }
-    } catch (err) {
-      console.error('Lỗi ngoại lệ khi register lot:', err);
-    }
-  }
-
-  const current = getLocalLots();
-  const exists = current.find(l => l.lotNumber === lot.lotNumber);
-  if (!exists) {
-    setLocalLots([...current, lot]);
-  }
-};
-
-/**
- * Nhập khẩu dữ liệu sao lưu (backup) vào Supabase
- */
-export const importDataToDB = async (data: {
-  tickets: Ticket[];
-  lots: LotInfo[];
-}): Promise<void> => {
-  if (data.tickets) {
-    setLocalTickets(data.tickets);
-    if (isSupabaseConfigured() && data.tickets.length > 0) {
-      try {
-        const rows = data.tickets.map(mapTicketToRow);
-        await supabase.from('tickets').upsert(rows, { onConflict: 'id' });
-      } catch (err) {
-        console.error('Lỗi upsert tickets khi import:', err);
-      }
-    }
-  }
-
-  if (data.lots) {
-    setLocalLots(data.lots);
-    if (isSupabaseConfigured() && data.lots.length > 0) {
-      try {
-        const lotRows = data.lots.map(mapLotToRow);
-        await supabase.from('lots').upsert(lotRows, { onConflict: 'lot_number' });
-      } catch (err) {
-        console.error('Lỗi upsert lots khi import:', err);
-      }
-    }
-  }
-};
-
-// ================= TỐI ƯU REALTIME SUBSCRIPTION (TIẾT KIỆM 99% EGRESS) =================
-export interface RealtimeHandlers {
-  onTicketInsert?: (ticket: Ticket) => void;
-  onTicketUpdate?: (ticket: Ticket) => void;
-  onTicketDelete?: (id: string) => void;
-  onLotInsert?: (lot: LotInfo) => void;
-  onLotUpdate?: (lot: LotInfo) => void;
-  onLotDelete?: (lotNumber: string) => void;
-  onFullRefreshNeeded?: () => void;
 }
 
 /**
- * Lắng nghe Realtime tự động và xử lý trực tiếp payload delta thay vì re-fetch toàn bộ bảng.
- * Giúp tiết kiệm tối đa Egress cho gói Supabase Free và đảm bảo tốc độ phản hồi < 100ms.
- * Đi kèm cleanup function để tránh duplicate WebSocket connection khi component re-render.
+ * Lấy toàn bộ báo cáo khi cần Export Backup Excel toàn diện hệ thống
  */
-export const subscribeToRealtimeChanges = (handlers: RealtimeHandlers): (() => void) => {
-  if (!isSupabaseConfigured()) {
-    return () => {};
+export async function fetchAllReportsForBackup(): Promise<DowntimeReport[]> {
+  return fetchReports(0); // 0 = Không giới hạn limit để backup đầy đủ
+}
+
+/**
+ * Thêm mới một báo cáo dừng Line
+ * Chỉ SELECT lại đúng các cột giao diện cần thiết
+ */
+export async function addReport(
+  formData: Omit<DowntimeReport, 'id' | 'createdAt'> & { id?: string }
+): Promise<DowntimeReport> {
+  const newReport: DowntimeReport = {
+    ...formData,
+    id: formData.id || `dt-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
+    createdAt: new Date().toISOString(),
+    reasonCategory: normalizeReasonCategory(formData.reasonCategory),
+  };
+
+  if (!isSupabaseConfigured) {
+    const current = getLocalReports();
+    const updated = [newReport, ...current];
+    setLocalReports(updated);
+    return newReport;
   }
 
-  const channelName = 'rma_realtime_optimized';
+  try {
+    const dbPayload = mapReportToDbRow(newReport);
+    // TỐI ƯU EGRESS: Không dùng .select() để Supabase không gửi ngược dữ liệu về client
+    const { error } = await supabase
+      .from('downtime_reports')
+      .insert([dbPayload]);
 
-  const channel = supabase
-    .channel(channelName)
-    // 1. Lắng nghe thay đổi trên bảng tickets
-    .on(
-      'postgres_changes',
-      { event: '*', schema: 'public', table: 'tickets' },
-      (payload) => {
-        try {
-          if (payload.eventType === 'INSERT' && payload.new) {
-            const newTicket = mapRowToTicket(payload.new);
-            handlers.onTicketInsert?.(newTicket);
-          } else if (payload.eventType === 'UPDATE' && payload.new) {
-            const updatedTicket = mapRowToTicket(payload.new);
-            handlers.onTicketUpdate?.(updatedTicket);
-          } else if (payload.eventType === 'DELETE' && payload.old) {
-            const id = (payload.old as any).id;
-            if (id) {
-              handlers.onTicketDelete?.(id);
-            }
-          }
-        } catch (err) {
-          console.error('Lỗi parse payload realtime tickets:', err);
-          handlers.onFullRefreshNeeded?.();
-        }
+    if (error) {
+      console.error('Lỗi Supabase addReport:', error);
+      throw error;
+    }
+
+    const current = getLocalReports().filter((r) => r.id !== newReport.id);
+    setLocalReports([newReport, ...current]);
+    return newReport;
+  } catch (err) {
+    const current = getLocalReports();
+    setLocalReports([newReport, ...current]);
+    throw err;
+  }
+}
+
+/**
+ * Cập nhật báo cáo dừng Line đã có
+ * TỐI ƯU EGRESS: Không dùng .select() để tiết kiệm băng thông tối đa
+ */
+export async function updateReport(report: DowntimeReport): Promise<DowntimeReport> {
+  const updatedReport: DowntimeReport = {
+    ...report,
+    reasonCategory: normalizeReasonCategory(report.reasonCategory),
+  };
+
+  if (!isSupabaseConfigured) {
+    const current = getLocalReports().map((r) => (r.id === updatedReport.id ? updatedReport : r));
+    setLocalReports(current);
+    return updatedReport;
+  }
+
+  try {
+    const dbPayload = mapReportToDbRow(updatedReport);
+    const { error } = await supabase
+      .from('downtime_reports')
+      .update(dbPayload)
+      .eq('id', updatedReport.id);
+
+    if (error) {
+      console.error('Lỗi Supabase updateReport:', error);
+      throw error;
+    }
+
+    const current = getLocalReports().map((r) => (r.id === updatedReport.id ? updatedReport : r));
+    setLocalReports(current);
+    return updatedReport;
+  } catch (err) {
+    const current = getLocalReports().map((r) => (r.id === updatedReport.id ? updatedReport : r));
+    setLocalReports(current);
+    throw err;
+  }
+}
+
+/**
+ * Xóa một báo cáo dừng Line theo ID
+ */
+export async function deleteReport(id: string): Promise<void> {
+  if (!isSupabaseConfigured) {
+    const current = getLocalReports().filter((r) => r.id !== id);
+    setLocalReports(current);
+    return;
+  }
+
+  try {
+    const { error } = await supabase
+      .from('downtime_reports')
+      .delete()
+      .eq('id', id);
+
+    if (error) {
+      console.error('Lỗi Supabase deleteReport:', error);
+      throw error;
+    }
+
+    const current = getLocalReports().filter((r) => r.id !== id);
+    setLocalReports(current);
+  } catch (err) {
+    const current = getLocalReports().filter((r) => r.id !== id);
+    setLocalReports(current);
+    throw err;
+  }
+}
+
+/**
+ * Xóa hàng loạt báo cáo dừng Line theo danh sách IDs
+ */
+export async function deleteMultipleReports(ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+
+  if (!isSupabaseConfigured) {
+    const current = getLocalReports().filter((r) => !ids.includes(r.id));
+    setLocalReports(current);
+    return;
+  }
+
+  try {
+    const { error } = await supabase
+      .from('downtime_reports')
+      .delete()
+      .in('id', ids);
+
+    if (error) {
+      console.error('Lỗi Supabase deleteMultipleReports:', error);
+      throw error;
+    }
+
+    const current = getLocalReports().filter((r) => !ids.includes(r.id));
+    setLocalReports(current);
+  } catch (err) {
+    const current = getLocalReports().filter((r) => !ids.includes(r.id));
+    setLocalReports(current);
+    throw err;
+  }
+}
+
+/**
+ * Đặt lại dữ liệu báo cáo về mặc định ban đầu
+ */
+export async function resetReportsToDefault(
+  initialReports: DowntimeReport[] = INITIAL_DOWNTIME_REPORTS
+): Promise<DowntimeReport[]> {
+  setLocalReports(initialReports);
+
+  if (!isSupabaseConfigured) {
+    return initialReports;
+  }
+
+  try {
+    await supabase.from('downtime_reports').delete().neq('id', '___NEVER_MATCH___');
+    await bulkImportReports(initialReports);
+    return initialReports;
+  } catch (err) {
+    console.warn('Lỗi resetReportsToDefault trên Supabase:', err);
+    return initialReports;
+  }
+}
+
+/**
+ * Lưu danh sách báo cáo hàng loạt (dùng khi Import Excel / Restore)
+ * TỐI ƯU EGRESS: Không dùng .select(), xử lý theo từng khối 50 bản ghi
+ */
+export async function bulkImportReports(reports: DowntimeReport[]): Promise<void> {
+  const normalized = reports.map((r) => ({
+    ...r,
+    reasonCategory: normalizeReasonCategory(r.reasonCategory),
+  }));
+
+  setLocalReports(normalized);
+
+  if (!isSupabaseConfigured || normalized.length === 0) {
+    return;
+  }
+
+  try {
+    const rows = normalized.map(mapReportToDbRow);
+    const CHUNK_SIZE = 50;
+    for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
+      const chunk = rows.slice(i, i + CHUNK_SIZE);
+      const { error } = await supabase
+        .from('downtime_reports')
+        .upsert(chunk, { onConflict: 'id' });
+
+      if (error) {
+        console.error('Lỗi Supabase bulkImportReports chunk:', error);
+        throw error;
       }
-    )
-    // 2. Lắng nghe thay đổi trên bảng lots
+    }
+  } catch (err) {
+    console.error('Ngoại lệ khi bulkImportReports:', err);
+    throw err;
+  }
+}
+
+// ============================================================================
+// ASYNC PRODUCTS CRUD (Tối ưu hóa Egress - Thêm, Sửa, Xóa, Import)
+// ============================================================================
+
+/**
+ * Lấy danh sách sản phẩm và định mức
+ * Chỉ SELECT đúng: name, line, unit_price, standard_rate
+ */
+export async function fetchProducts(): Promise<Product[]> {
+  if (!isSupabaseConfigured) {
+    return getLocalProducts();
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from('products')
+      .select(PRODUCT_COLUMNS)
+      .order('name', { ascending: true });
+
+    if (error) {
+      console.warn('Lỗi khi truy vấn Supabase products:', error.message);
+      return getLocalProducts();
+    }
+
+    if (!data || data.length === 0) {
+      const local = getLocalProducts();
+      if (local.length > 0) {
+        await saveProducts(local).catch(() => {});
+        return local;
+      }
+      return PRODUCTS;
+    }
+
+    const formatted = data.map(mapDbRowToProduct);
+    setLocalProducts(formatted);
+    return formatted;
+  } catch (err) {
+    console.error('Lỗi fetchProducts:', err);
+    return getLocalProducts();
+  }
+}
+
+/**
+ * Thêm mới 1 sản phẩm lên Supabase
+ * TỐI ƯU EGRESS: Không dùng .select()
+ */
+export async function addProduct(product: Product): Promise<Product> {
+  const cleanProduct: Product = {
+    ...product,
+    name: product.name.trim(),
+    unitPrice: Number(product.unitPrice) || 0,
+    standardRate: Number(product.standardRate) || 0,
+  };
+
+  if (isSupabaseConfigured) {
+    const row = mapProductToDbRow(cleanProduct);
+    const { error } = await supabase
+      .from('products')
+      .insert([row]);
+
+    if (error) {
+      console.error('Lỗi Supabase addProduct:', error);
+      throw error;
+    }
+  }
+
+  const current = getLocalProducts().filter((p) => p.name !== cleanProduct.name);
+  setLocalProducts([cleanProduct, ...current]);
+  return cleanProduct;
+}
+
+/**
+ * Cập nhật thông tin 1 sản phẩm trên Supabase
+ * TỐI ƯU EGRESS: Không dùng .select()
+ */
+export async function updateProduct(oldName: string, product: Product): Promise<Product> {
+  const cleanProduct: Product = {
+    ...product,
+    name: product.name.trim(),
+    unitPrice: Number(product.unitPrice) || 0,
+    standardRate: Number(product.standardRate) || 0,
+  };
+
+  if (isSupabaseConfigured) {
+    const row = mapProductToDbRow(cleanProduct);
+    if (oldName === cleanProduct.name) {
+      const { error } = await supabase
+        .from('products')
+        .update(row)
+        .eq('name', oldName);
+      if (error) {
+        console.error('Lỗi Supabase updateProduct:', error);
+        throw error;
+      }
+    } else {
+      // Trường hợp đổi tên sản phẩm (Primary key)
+      const { error: insError } = await supabase
+        .from('products')
+        .insert([row]);
+      if (insError) throw insError;
+
+      await supabase
+        .from('products')
+        .delete()
+        .eq('name', oldName);
+    }
+  }
+
+  const current = getLocalProducts().map((p) => (p.name === oldName ? cleanProduct : p));
+  setLocalProducts(current);
+  return cleanProduct;
+}
+
+/**
+ * Xóa 1 sản phẩm khỏi Supabase
+ * TỐI ƯU EGRESS: Xóa theo khóa chính name
+ */
+export async function deleteProduct(name: string): Promise<void> {
+  if (isSupabaseConfigured) {
+    const { error } = await supabase
+      .from('products')
+      .delete()
+      .eq('name', name);
+
+    if (error) {
+      console.error('Lỗi Supabase deleteProduct:', error);
+      throw error;
+    }
+  }
+
+  const current = getLocalProducts().filter((p) => p.name !== name);
+  setLocalProducts(current);
+}
+
+/**
+ * Lưu/Cập nhật danh sách sản phẩm hàng loạt (dùng khi Import Excel)
+ * TỐI ƯU EGRESS: Không dùng .select(), xử lý theo khối 50 bản ghi
+ */
+export async function saveProducts(products: Product[]): Promise<void> {
+  setLocalProducts(products);
+
+  if (!isSupabaseConfigured || products.length === 0) {
+    return;
+  }
+
+  try {
+    const rows = products.map(mapProductToDbRow);
+    const CHUNK_SIZE = 50;
+    for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
+      const chunk = rows.slice(i, i + CHUNK_SIZE);
+      const { error } = await supabase
+        .from('products')
+        .upsert(chunk, { onConflict: 'name' });
+
+      if (error) {
+        console.error('Lỗi Supabase saveProducts chunk:', error);
+        throw error;
+      }
+    }
+  } catch (err) {
+    console.error('Ngoại lệ khi saveProducts:', err);
+    throw err;
+  }
+}
+
+/**
+ * Đặt lại danh mục sản phẩm về mặc định Sunhouse
+ */
+export async function resetProductsToDefault(
+  defaultProducts: Product[] = PRODUCTS
+): Promise<Product[]> {
+  setLocalProducts(defaultProducts);
+
+  if (!isSupabaseConfigured) {
+    return defaultProducts;
+  }
+
+  try {
+    await supabase.from('products').delete().neq('name', '___NEVER_MATCH___');
+    await saveProducts(defaultProducts);
+    return defaultProducts;
+  } catch (err) {
+    console.warn('Lỗi resetProductsToDefault trên Supabase:', err);
+    return defaultProducts;
+  }
+}
+
+// ============================================================================
+// TỐI ƯU REALTIME SUBSCRIPTIONS (Báo Cáo, Sản Phẩm, Nhân Sự)
+// 1. Delta updates: Dùng trực tiếp payload.new / payload.old mà KHÔNG re-fetch
+// 2. Tiết kiệm 100% Egress cho mọi sự kiện Thêm, Sửa, Xóa, Upfile Excel
+// ============================================================================
+
+export type RealtimeReportEvent = {
+  eventType: 'INSERT' | 'UPDATE' | 'DELETE' | string;
+  new?: DowntimeReport;
+  oldId?: string;
+};
+
+/**
+ * Lắng nghe thay đổi dữ liệu realtime trên bảng downtime_reports
+ */
+export function subscribeToReports(
+  onDataChange: (event: RealtimeReportEvent) => void
+): { unsubscribe: () => void } & (() => void) {
+  if (!isSupabaseConfigured) {
+    const noop = () => {};
+    (noop as any).unsubscribe = noop;
+    return noop as any;
+  }
+
+  const channelId = `realtime_downtime_reports_${Date.now()}`;
+  const channel = supabase
+    .channel(channelId)
     .on(
       'postgres_changes',
-      { event: '*', schema: 'public', table: 'lots' },
+      { 
+        event: '*', 
+        schema: 'public', 
+        table: 'downtime_reports' 
+      },
       (payload) => {
-        try {
-          if (payload.eventType === 'INSERT' && payload.new) {
-            const newLot = mapRowToLot(payload.new);
-            handlers.onLotInsert?.(newLot);
-          } else if (payload.eventType === 'UPDATE' && payload.new) {
-            const updatedLot = mapRowToLot(payload.new);
-            handlers.onLotUpdate?.(updatedLot);
-          } else if (payload.eventType === 'DELETE' && payload.old) {
-            const lotNumber = (payload.old as any).lot_number || (payload.old as any).lotNumber;
-            if (lotNumber) {
-              handlers.onLotDelete?.(lotNumber);
-            }
-          }
-        } catch (err) {
-          console.error('Lỗi parse payload realtime lots:', err);
-          handlers.onFullRefreshNeeded?.();
-        }
+        const eventType = payload.eventType as 'INSERT' | 'UPDATE' | 'DELETE';
+        const newRecord = payload.new && Object.keys(payload.new).length > 0 
+          ? mapDbRowToReport(payload.new) 
+          : undefined;
+        const oldId = (payload.old as any)?.id ? String((payload.old as any).id) : undefined;
+
+        onDataChange({
+          eventType,
+          new: newRecord,
+          oldId,
+        });
       }
     )
     .subscribe((status) => {
       if (status === 'SUBSCRIBED') {
-        console.log('✅ Kích hoạt Supabase Realtime Channel tiết kiệm Egress');
+        console.debug('[Supabase Realtime] Đã kết nối kênh downtime_reports');
       }
     });
 
-  // Cleanup function dọn dẹp subscription ngay khi unmount, ngăn rò rỉ socket và duplicate events
-  return () => {
+  const cleanup = () => {
     supabase.removeChannel(channel);
   };
-};
+  (cleanup as any).unsubscribe = cleanup;
+  return cleanup as any;
+}
 
-// ================= QUẢN LÝ NHÂN SỰ (WORKERS) CRUD & REALTIME =================
-
-const INITIAL_WORKERS: Worker[] = [
-  {
-    id: 'W-001',
-    name: 'Nguyễn Văn An',
-    code: 'NV-01',
-    role: 'Kỹ thuật viên Trưởng',
-    department: 'Xưởng Rework NMBD',
-    phone: '0912345678',
-    email: 'an.nv@sunhouse.com.vn',
-    active: true,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  },
-  {
-    id: 'W-002',
-    name: 'Trần Thị Bình',
-    code: 'NV-02',
-    role: 'Kỹ thuật viên Đánh giá',
-    department: 'Phòng Bảo Hành',
-    phone: '0987654321',
-    email: 'binh.tt@sunhouse.com.vn',
-    active: true,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  },
-];
-
-export const getLocalWorkers = (): Worker[] => {
-  const saved = localStorage.getItem(WORKERS_STORAGE_KEY);
-  if (saved) {
-    try {
-      return JSON.parse(saved);
-    } catch (e) {
-      console.error('Failed to parse local workers', e);
-    }
-  }
-  return INITIAL_WORKERS;
-};
-
-export const setLocalWorkers = (workers: Worker[]) => {
-  localStorage.setItem(WORKERS_STORAGE_KEY, JSON.stringify(workers));
-};
-
-export const mapRowToWorker = (row: any): Worker => {
-  return {
-    id: String(row.id),
-    name: row.name ?? row.full_name ?? '',
-    code: row.code ?? row.worker_code ?? undefined,
-    role: row.role ?? undefined,
-    department: row.department ?? undefined,
-    phone: row.phone ?? undefined,
-    email: row.email ?? undefined,
-    active: row.active ?? row.is_active ?? true,
-    createdAt: row.created_at ?? row.createdAt ?? new Date().toISOString(),
-    updatedAt: row.updated_at ?? row.updatedAt ?? new Date().toISOString(),
-  };
-};
-
-export const mapWorkerToRow = (worker: Partial<Worker>): Record<string, any> => {
-  const row: Record<string, any> = {};
-  if (worker.id !== undefined) row.id = worker.id;
-  if (worker.name !== undefined) row.name = worker.name;
-  if (worker.code !== undefined) row.code = worker.code;
-  if (worker.role !== undefined) row.role = worker.role;
-  if (worker.department !== undefined) row.department = worker.department;
-  if (worker.phone !== undefined) row.phone = worker.phone;
-  if (worker.email !== undefined) row.email = worker.email;
-  if (worker.active !== undefined) row.active = worker.active;
-  if (worker.createdAt !== undefined) row.created_at = worker.createdAt;
-  if (worker.updatedAt !== undefined) row.updated_at = worker.updatedAt;
-  return row;
+export type RealtimeProductEvent = {
+  eventType: 'INSERT' | 'UPDATE' | 'DELETE' | string;
+  new?: Product;
+  old?: { name?: string };
 };
 
 /**
- * 1. FETCH WORKERS: Lấy danh sách nhân sự từ Supabase
+ * Lắng nghe thay đổi dữ liệu realtime trên bảng products
+ * TỐI ƯU EGRESS: Cập nhật delta state trực tiếp, không re-fetch
  */
-export const fetchWorkersFromDB = async (): Promise<Worker[]> => {
-  if (isSupabaseConfigured()) {
-    try {
-      const { data, error } = await supabase
-        .from('workers')
-        .select(WORKER_SELECT_COLUMNS)
-        .order('created_at', { ascending: false });
-
-      if (error) {
-        console.warn('Lỗi fetch workers từ Supabase, fallback sang cache cục bộ:', error.message);
-        return getLocalWorkers();
-      }
-
-      if (data) {
-        const mapped = data.map(mapRowToWorker);
-        setLocalWorkers(mapped);
-        return mapped;
-      }
-    } catch (err) {
-      console.error('Lỗi ngoại lệ khi fetch workers:', err);
-      return getLocalWorkers();
-    }
+export function subscribeToProducts(
+  onDataChange: (event: RealtimeProductEvent) => void
+): { unsubscribe: () => void } & (() => void) {
+  if (!isSupabaseConfigured) {
+    const noop = () => {};
+    (noop as any).unsubscribe = noop;
+    return noop as any;
   }
-  return getLocalWorkers();
+
+  const channelId = `realtime_products_${Date.now()}`;
+  const channel = supabase
+    .channel(channelId)
+    .on(
+      'postgres_changes',
+      {
+        event: '*',
+        schema: 'public',
+        table: 'products',
+      },
+      (payload) => {
+        const newRecord =
+          payload.new && Object.keys(payload.new).length > 0
+            ? mapDbRowToProduct(payload.new)
+            : undefined;
+
+        onDataChange({
+          eventType: payload.eventType,
+          new: newRecord,
+          old: payload.old as { name?: string },
+        });
+      }
+    )
+    .subscribe((status) => {
+      if (status === 'SUBSCRIBED') {
+        console.debug('[Supabase Realtime] Đã kết nối kênh products');
+      }
+    });
+
+  const cleanup = () => {
+    supabase.removeChannel(channel);
+  };
+  (cleanup as any).unsubscribe = cleanup;
+  return cleanup as any;
+}
+
+// ============================================================================
+// ASYNC WORKERS CRUD & REALTIME (Quản lý Nhân sự / Kỹ thuật viên kết nối Supabase)
+// ============================================================================
+
+export type RealtimeWorkerEvent = {
+  eventType: string;
+  new?: Worker;
+  old?: { id?: string };
 };
 
 /**
- * 2. INSERT WORKER: Thêm mới nhân sự lên Supabase
- * Tự động sinh ID hợp lệ nếu chưa có
+ * Lấy danh sách nhân sự từ Supabase
+ * TỐI ƯU EGRESS: Chỉ select đúng 5 cột cần thiết cho bảng hiển thị
  */
-export const createWorkerInDB = async (
-  newData: Omit<Worker, 'id' | 'createdAt' | 'updatedAt'> & { id?: string }
-): Promise<{ data: Worker | null; error: any }> => {
-  const now = new Date().toISOString();
-  const workerId = newData.id?.trim() || `W-${Date.now().toString().slice(-6)}`;
-  
-  const workerRecord: Worker = {
-    ...newData,
-    id: workerId,
-    active: newData.active ?? true,
-    createdAt: now,
-    updatedAt: now,
-  };
+export async function fetchWorkers(limit: number = 100): Promise<Worker[]> {
+  if (!isSupabaseConfigured) {
+    return getLocalWorkers().slice(0, limit);
+  }
 
-  const row = mapWorkerToRow(workerRecord);
-
-  if (isSupabaseConfigured()) {
-    const { data, error } = await supabase
+  try {
+    let query = supabase
       .from('workers')
-      .insert([row])
-      .select()
-      .single();
+      .select('id, worker_code, full_name, department, status');
+
+    if (limit > 0) {
+      query = query.limit(limit);
+    }
+
+    const { data, error } = await query;
 
     if (error) {
-      console.error('Lỗi khi thêm nhân viên vào Supabase:', error.message);
-      return { data: null, error };
+      console.warn('Lỗi khi truy vấn Supabase workers:', error.message);
+      return getLocalWorkers().slice(0, limit);
     }
 
-    const created = data ? mapRowToWorker(data) : workerRecord;
-    // Cập nhật local cache
-    const current = getLocalWorkers();
-    setLocalWorkers([created, ...current]);
-    return { data: created, error: null };
-  }
+    if (!data || data.length === 0) {
+      const local = getLocalWorkers();
+      return local.slice(0, limit);
+    }
 
-  // Chế độ offline
-  const current = getLocalWorkers();
-  setLocalWorkers([workerRecord, ...current]);
-  return { data: workerRecord, error: null };
-};
+    const formatted = data.map(mapDbRowToWorker);
+    setLocalWorkers(formatted);
+    return formatted;
+  } catch (err) {
+    console.error('Lỗi ngoại lệ khi fetchWorkers:', err);
+    return getLocalWorkers().slice(0, limit);
+  }
+}
 
 /**
- * 3. UPDATE WORKER: Cập nhật thông tin nhân viên trên Supabase
+ * THÊM MỚI (INSERT):
+ * Gọi trực tiếp supabase.from('workers').insert([data])
+ * Không dùng .select() để tiết kiệm băng thông egress
  */
-export const updateWorkerInDB = async (
-  workerId: string,
-  updatedData: Partial<Worker>
-): Promise<{ data: Worker | null; error: any }> => {
-  const now = new Date().toISOString();
-  const updatesWithTime = { ...updatedData, updatedAt: now };
-  const row = mapWorkerToRow(updatesWithTime);
+export async function addWorker(
+  workerData: Partial<Worker> & { id?: string }
+): Promise<Worker> {
+  const newId = workerData.id || `w-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+  const workerCode = workerData.worker_code || workerData.code || `SH-${Math.floor(1000 + Math.random() * 9000)}`;
+  const fullName = workerData.full_name || workerData.name || '';
 
-  if (isSupabaseConfigured()) {
-    const { data, error } = await supabase
+  const newWorker: Worker = {
+    ...workerData,
+    id: newId,
+    worker_code: workerCode,
+    full_name: fullName,
+    code: workerCode,
+    name: fullName,
+    department: workerData.department || 'Dây chuyền LR RO',
+    status: workerData.status || 'Đang làm việc',
+  };
+
+  const dbPayload = mapWorkerToDbRow(newWorker);
+
+  if (isSupabaseConfigured) {
+    const { error } = await supabase
       .from('workers')
-      .update(row)
-      .eq('id', workerId)
-      .select()
-      .single();
+      .insert([dbPayload]);
 
     if (error) {
-      console.error(`Lỗi cập nhật nhân viên ${workerId} trên Supabase:`, error.message);
-      return { data: null, error };
+      console.error('Lỗi Supabase addWorker:', error);
+      throw new Error(error.message || 'Lỗi khi thêm nhân viên lên Supabase');
     }
-
-    const updated = data ? mapRowToWorker(data) : ({ id: workerId, ...updatesWithTime } as Worker);
-    // Cập nhật local cache
-    const current = getLocalWorkers();
-    setLocalWorkers(current.map(w => (w.id === workerId ? { ...w, ...updated } : w)));
-    return { data: updated, error: null };
   }
 
-  // Chế độ offline
-  const current = getLocalWorkers();
-  const updatedList = current.map(w => (w.id === workerId ? { ...w, ...updatesWithTime } : w));
-  setLocalWorkers(updatedList);
-  return { data: updatedList.find(w => w.id === workerId) || null, error: null };
-};
+  const current = getLocalWorkers().filter((w) => w.id !== newId);
+  setLocalWorkers([newWorker, ...current]);
+  return newWorker;
+}
 
 /**
- * 4. DELETE WORKER: Xóa nhân viên trực tiếp trên Supabase
+ * SỬA / CẬP NHẬT (UPDATE):
+ * Gọi trực tiếp supabase.from('workers').update(data).eq('id', id)
  */
-export const deleteWorkerInDB = async (workerId: string): Promise<{ error: any }> => {
-  if (isSupabaseConfigured()) {
+export async function updateWorker(
+  id: string, 
+  data: Partial<Worker>
+): Promise<Worker> {
+  const dbPayload = mapWorkerToDbRow(data);
+
+  if (isSupabaseConfigured) {
+    const { error } = await supabase
+      .from('workers')
+      .update(dbPayload)
+      .eq('id', id);
+
+    if (error) {
+      console.error('Lỗi Supabase updateWorker:', error);
+      throw new Error(error.message || 'Lỗi khi cập nhật nhân viên trên Supabase');
+    }
+  }
+
+  const current = getLocalWorkers();
+  const index = current.findIndex((w) => w.id === id);
+  const fullName = data.full_name || data.name || (index >= 0 ? current[index].full_name : '');
+  const workerCode = data.worker_code || data.code || (index >= 0 ? current[index].worker_code : '');
+
+  const updatedWorker: Worker = {
+    ...(index >= 0 ? current[index] : ({} as Worker)),
+    ...data,
+    id,
+    full_name: fullName,
+    name: fullName || '',
+    worker_code: workerCode,
+    code: workerCode,
+  };
+
+  if (index >= 0) {
+    current[index] = updatedWorker;
+    setLocalWorkers([...current]);
+  }
+  return updatedWorker;
+}
+
+/**
+ * XÓA (DELETE):
+ * Gọi trực tiếp supabase.from('workers').delete().eq('id', id)
+ */
+export async function deleteWorker(id: string): Promise<void> {
+  if (isSupabaseConfigured) {
     const { error } = await supabase
       .from('workers')
       .delete()
-      .eq('id', workerId);
+      .eq('id', id);
 
     if (error) {
-      console.error(`Lỗi xóa nhân viên ${workerId} trên Supabase:`, error.message);
-      return { error };
+      console.error('Lỗi Supabase deleteWorker:', error);
+      throw new Error(error.message || 'Lỗi khi xóa nhân viên trên Supabase');
     }
   }
 
-  // Cập nhật local cache
-  const current = getLocalWorkers();
-  setLocalWorkers(current.filter(w => w.id !== workerId));
-  return { error: null };
-};
+  const current = getLocalWorkers().filter((w) => w.id !== id);
+  setLocalWorkers(current);
+}
 
 /**
- * 5. SUBSCRIBE WORKERS REALTIME: Lắng nghe realtime từ bảng workers
- * Sử dụng đúng channel 'schema-db-changes' theo yêu cầu
+ * Lưu danh sách nhân viên hàng loạt (Seeding / Restore)
  */
-export const subscribeToWorkersRealtime = (onWorkersChange: () => void): (() => void) => {
-  if (!isSupabaseConfigured()) {
-    return () => {};
+export async function bulkImportWorkers(workers: Worker[]): Promise<void> {
+  setLocalWorkers(workers);
+
+  if (!isSupabaseConfigured || workers.length === 0) {
+    return;
+  }
+
+  try {
+    const rows = workers.map(mapWorkerToDbRow);
+    const CHUNK_SIZE = 50;
+    for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
+      const chunk = rows.slice(i, i + CHUNK_SIZE);
+      const { error } = await supabase
+        .from('workers')
+        .upsert(chunk, { onConflict: 'id' });
+
+      if (error) {
+        console.error('Lỗi Supabase bulkImportWorkers chunk:', error);
+        throw error;
+      }
+    }
+  } catch (err) {
+    console.error('Ngoại lệ khi bulkImportWorkers:', err);
+    throw err;
+  }
+}
+
+/**
+ * Đặt lại danh sách nhân sự về mặc định Sunhouse
+ */
+export async function resetWorkersToDefault(
+  initialWorkers: Worker[] = INITIAL_WORKERS
+): Promise<Worker[]> {
+  setLocalWorkers(initialWorkers);
+
+  if (!isSupabaseConfigured) {
+    return initialWorkers;
+  }
+
+  try {
+    await supabase.from('workers').delete().neq('id', '___NEVER_MATCH___');
+    await bulkImportWorkers(initialWorkers);
+    return initialWorkers;
+  } catch (err) {
+    console.warn('Lỗi resetWorkersToDefault trên Supabase:', err);
+    return initialWorkers;
+  }
+}
+
+/**
+ * ĐỒNG BỘ REALTIME TỐI ƯU EGRESS:
+ * Lắng nghe sự kiện (INSERT, UPDATE, DELETE) và chuyển delta payload trực tiếp.
+ * Trả về đối tượng có phương thức .unsubscribe() để cleanup khi component unmount.
+ */
+export function subscribeToWorkers(
+  onEvent: (event: RealtimeWorkerEvent) => void
+): { unsubscribe: () => void } {
+  if (!isSupabaseConfigured) {
+    return {
+      unsubscribe: () => {},
+    };
   }
 
   const channel = supabase
-    .channel('schema-db-changes')
+    .channel('workers-realtime-channel')
     .on(
       'postgres_changes',
       { event: '*', schema: 'public', table: 'workers' },
-      () => {
-        onWorkersChange();
+      (payload) => {
+        console.info('[Realtime Workers] Delta event:', payload.eventType);
+        const newRecord =
+          payload.new && Object.keys(payload.new).length > 0
+            ? mapDbRowToWorker(payload.new)
+            : undefined;
+
+        onEvent({
+          eventType: payload.eventType,
+          new: newRecord,
+          old: payload.old as { id?: string },
+        });
       }
     )
-    .subscribe((status) => {
-      if (status === 'SUBSCRIBED') {
-        console.log('✅ Kích hoạt Realtime Channel cho bảng workers (schema-db-changes)');
-      }
-    });
+    .subscribe();
 
-  return () => {
-    supabase.removeChannel(channel);
+  return {
+    unsubscribe: () => {
+      supabase.removeChannel(channel);
+    },
   };
-};
+}
 
