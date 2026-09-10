@@ -1,0 +1,6 @@
+{
+  "name": "RMA Rework Flow",
+  "description": "Hệ thống quản lý quy trình Rework hàng lỗi RMA qua 6 bước tiêu chuẩn.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
