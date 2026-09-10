@@ -17,8 +17,7 @@ export default function ColumnScanner({ stepId }: Props) {
   const processScan = (scannedId: string) => {
     // Handle IMEI scan for Step 5
     if (pendingTicketId && stepId === WorkflowStep.FINISHED) {
-      updateTicket(pendingTicketId, { imei: scannedId });
-      moveTicket(pendingTicketId, WorkflowStep.FINISHED);
+      updateTicket(pendingTicketId, { imei: scannedId, status: WorkflowStep.FINISHED });
       setPendingTicketId(null);
       setInputValue('');
       return;

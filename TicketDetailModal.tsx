@@ -11,10 +11,12 @@ interface Props {
 }
 
 export default function TicketDetailModal({ ticketId, onClose }: Props) {
-  const { tickets, updateTicket, moveTicket, deleteTicket } = useTickets();
+  const { tickets, updateTicket, deleteTicket } = useTickets();
   const ticket = tickets.find(t => t.id === ticketId);
   const [formData, setFormData] = useState<Partial<Ticket>>({});
   const [isConfirmingDelete, setIsConfirmingDelete] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [savedSuccess, setSavedSuccess] = useState(false);
 
   useEffect(() => {
     if (ticket) setFormData(ticket);
@@ -25,15 +27,36 @@ export default function TicketDetailModal({ ticketId, onClose }: Props) {
   const currentStepIndex = WORKFLOW_STEPS.findIndex(s => s.id === ticket.status);
   const nextStep = WORKFLOW_STEPS[currentStepIndex + 1];
 
-  const handleUpdate = () => {
-    updateTicket(ticket.id, formData);
+  const handleUpdate = async () => {
+    setIsSaving(true);
+    try {
+      await updateTicket(ticket.id, formData);
+      setSavedSuccess(true);
+      setTimeout(() => setSavedSuccess(false), 2000);
+    } catch (err) {
+      console.error('Lỗi khi lưu ticket:', err);
+    } finally {
+      setIsSaving(false);
+    }
   };
 
-  const handleMove = () => {
-    handleUpdate();
+  const handleMove = async () => {
     if (nextStep) {
-      moveTicket(ticket.id, nextStep.id);
-      onClose();
+      setIsSaving(true);
+      try {
+        // Đồng bộ toàn bộ dữ liệu đã chỉnh sửa cùng với trạng thái mới trong 1 thao tác duy nhất
+        const updatedTicketData = {
+          ...formData,
+          status: nextStep.id,
+          updatedAt: new Date().toISOString(),
+        };
+        await updateTicket(ticket.id, updatedTicketData);
+        onClose();
+      } catch (err) {
+        console.error('Lỗi khi chuyển bước:', err);
+      } finally {
+        setIsSaving(false);
+      }
     }
   };
 
@@ -41,9 +64,16 @@ export default function TicketDetailModal({ ticketId, onClose }: Props) {
     setIsConfirmingDelete(true);
   };
 
-  const handleConfirmDelete = () => {
-    deleteTicket(ticket.id);
-    onClose();
+  const handleConfirmDelete = async () => {
+    setIsSaving(true);
+    try {
+      await deleteTicket(ticket.id);
+      onClose();
+    } catch (err) {
+      console.error('Lỗi khi xóa ticket:', err);
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   const renderCurrentStepFields = () => {
@@ -267,18 +297,29 @@ export default function TicketDetailModal({ ticketId, onClose }: Props) {
                 
                 <button 
                   onClick={handleUpdate}
-                  className="px-4 py-2 text-slate-600 font-medium hover:bg-slate-100 rounded-lg transition-colors flex items-center space-x-2"
+                  disabled={isSaving}
+                  className="px-4 py-2 text-slate-600 font-medium hover:bg-slate-100 rounded-lg transition-colors flex items-center space-x-2 disabled:opacity-50"
                 >
-                  <Save className="w-4 h-4" />
-                  <span>Lưu thông tin</span>
+                  {savedSuccess ? (
+                    <>
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                      <span className="text-emerald-700 font-bold">Đã lưu!</span>
+                    </>
+                  ) : (
+                    <>
+                      <Save className="w-4 h-4" />
+                      <span>{isSaving ? 'Đang lưu...' : 'Lưu thông tin'}</span>
+                    </>
+                  )}
                 </button>
                 
                 {nextStep && (
                   <button 
                     onClick={handleMove}
+                    disabled={isSaving}
                     className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white font-medium rounded-lg transition-colors shadow-sm flex items-center space-x-2"
                   >
-                    <span>Chuyển: {nextStep.label}</span>
+                    <span>{isSaving ? 'Đang xử lý...' : `Chuyển: ${nextStep.label}`}</span>
                     <ArrowRight className="w-4 h-4" />
                   </button>
                 )}

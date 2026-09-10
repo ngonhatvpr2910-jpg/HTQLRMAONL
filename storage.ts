@@ -188,7 +188,7 @@ export const mapLotToRow = (lot: LotInfo): any => {
  * Lấy danh sách phiếu RMA từ Supabase với cột cụ thể và giới hạn số lượng để tiết kiệm Egress
  * Mặc định lấy 100 phiếu gần nhất (đáp ứng tiêu chuẩn gói Free)
  */
-export const fetchTicketsFromDB = async (limit: number = 100): Promise<Ticket[]> => {
+export const fetchTicketsFromDB = async (limit: number = 500): Promise<Ticket[]> => {
   if (isSupabaseConfigured()) {
     try {
       const { data, error } = await supabase
@@ -204,8 +204,15 @@ export const fetchTicketsFromDB = async (limit: number = 100): Promise<Ticket[]>
 
       if (data) {
         const mapped = data.map(mapRowToTicket);
-        setLocalTickets(mapped);
-        return mapped;
+        // Gộp dữ liệu Supabase với local cache để không bao giờ làm mất dữ liệu cục bộ
+        const local = getLocalTickets();
+        const map = new Map<string, Ticket>();
+        local.forEach(t => map.set(t.id, t));
+        mapped.forEach(t => map.set(t.id, t));
+        const merged = Array.from(map.values());
+
+        setLocalTickets(merged);
+        return merged;
       }
     } catch (err) {
       console.error('Lỗi ngoại lệ khi kết nối Supabase:', err);
@@ -216,9 +223,9 @@ export const fetchTicketsFromDB = async (limit: number = 100): Promise<Ticket[]>
 };
 
 /**
- * Lấy danh sách lô hàng với cột cụ thể và giới hạn 100 bản ghi
+ * Lấy danh sách lô hàng với cột cụ thể và giới hạn bản ghi
  */
-export const fetchLotsFromDB = async (limit: number = 100): Promise<LotInfo[]> => {
+export const fetchLotsFromDB = async (limit: number = 500): Promise<LotInfo[]> => {
   if (isSupabaseConfigured()) {
     try {
       const { data, error } = await supabase
@@ -234,8 +241,14 @@ export const fetchLotsFromDB = async (limit: number = 100): Promise<LotInfo[]> =
 
       if (data) {
         const mapped = data.map(mapRowToLot);
-        setLocalLots(mapped);
-        return mapped;
+        const local = getLocalLots();
+        const map = new Map<string, LotInfo>();
+        local.forEach(l => map.set(l.lotNumber, l));
+        mapped.forEach(l => map.set(l.lotNumber, l));
+        const merged = Array.from(map.values());
+
+        setLocalLots(merged);
+        return merged;
       }
     } catch (err) {
       console.error('Lỗi ngoại lệ khi fetch lots:', err);
@@ -291,11 +304,15 @@ export const createTicketInDB = async (
     updatedAt: now.toISOString(),
   };
 
+  // Cập nhật local cache ngay lập tức
+  const current = getLocalTickets();
+  setLocalTickets([newTicket, ...current]);
+
   if (isSupabaseConfigured()) {
     try {
       const { error } = await supabase
         .from('tickets')
-        .insert([mapTicketToRow(newTicket)]);
+        .upsert([mapTicketToRow(newTicket)], { onConflict: 'id' });
 
       if (error) {
         console.error('Lỗi khi thêm phiếu vào Supabase:', error.message);
@@ -304,10 +321,6 @@ export const createTicketInDB = async (
       console.error('Lỗi ngoại lệ khi thêm ticket:', err);
     }
   }
-
-  // Cập nhật local cache
-  const current = getLocalTickets();
-  setLocalTickets([newTicket, ...current]);
 
   return newTicket;
 };
@@ -319,6 +332,12 @@ export const batchCreateTicketsInDB = async (
   newTickets: Ticket[]
 ): Promise<void> => {
   if (newTickets.length === 0) return;
+
+  // Cập nhật local cache ngay lập tức
+  const current = getLocalTickets();
+  const existingIds = new Set(newTickets.map(t => t.id));
+  const filtered = current.filter(t => !existingIds.has(t.id));
+  setLocalTickets([...newTickets, ...filtered]);
 
   if (isSupabaseConfigured()) {
     try {
@@ -333,16 +352,10 @@ export const batchCreateTicketsInDB = async (
       throw err;
     }
   }
-
-  // Cập nhật local cache
-  const current = getLocalTickets();
-  const existingIds = new Set(newTickets.map(t => t.id));
-  const filtered = current.filter(t => !existingIds.has(t.id));
-  setLocalTickets([...newTickets, ...filtered]);
 };
 
 /**
- * Cập nhật thông tin phiếu RMA trên Supabase
+ * Cập nhật thông tin phiếu RMA trên Supabase (hỗ trợ atomic upsert và fallback)
  */
 export const updateTicketInDB = async (
   id: string,
@@ -351,25 +364,41 @@ export const updateTicketInDB = async (
   const updatedAt = new Date().toISOString();
   const fullUpdates = { ...updates, updatedAt };
 
+  // 1. Cập nhật local cache ngay lập tức
+  const current = getLocalTickets();
+  const existing = current.find(t => t.id === id);
+  const updatedTicket: Ticket = existing
+    ? { ...existing, ...fullUpdates }
+    : ({ id, ...fullUpdates } as Ticket);
+
+  const updatedList = current.map(t => (t.id === id ? updatedTicket : t));
+  if (!existing && updatedTicket.productName) {
+    updatedList.unshift(updatedTicket);
+  }
+  setLocalTickets(updatedList);
+
+  // 2. Lưu lên Supabase
   if (isSupabaseConfigured()) {
     try {
+      const row = mapTicketToRow(updatedTicket);
       const { error } = await supabase
         .from('tickets')
-        .update(mapTicketToRow(fullUpdates))
-        .eq('id', id);
+        .upsert([row], { onConflict: 'id' });
 
       if (error) {
-        console.error(`Lỗi khi cập nhật phiếu ${id} trên Supabase:`, error.message);
+        console.warn(`Lỗi upsert phiếu ${id} trên Supabase, thử fallback update:`, error.message);
+        const { error: updateErr } = await supabase
+          .from('tickets')
+          .update(mapTicketToRow(fullUpdates))
+          .eq('id', id);
+        if (updateErr) {
+          console.error(`Lỗi update fallback phiếu ${id}:`, updateErr.message);
+        }
       }
     } catch (err) {
       console.error('Lỗi ngoại lệ khi update ticket:', err);
     }
   }
-
-  // Cập nhật local cache
-  const current = getLocalTickets();
-  const updated = current.map(t => (t.id === id ? { ...t, ...fullUpdates } : t));
-  setLocalTickets(updated);
 };
 
 /**
@@ -392,23 +421,7 @@ export const moveLotInDB = async (
 ): Promise<void> => {
   const updatedAt = new Date().toISOString();
 
-  if (isSupabaseConfigured()) {
-    try {
-      const { error } = await supabase
-        .from('tickets')
-        .update({ status: newStatus, updated_at: updatedAt })
-        .eq('lot_number', lotNumber)
-        .eq('status', currentStatus);
-
-      if (error) {
-        console.error(`Lỗi khi chuyển lô ${lotNumber} trên Supabase:`, error.message);
-      }
-    } catch (err) {
-      console.error('Lỗi ngoại lệ khi move lot:', err);
-    }
-  }
-
-  // Cập nhật local cache
+  // 1. Cập nhật local cache ngay lập tức
   const current = getLocalTickets();
   const updated = current.map(t =>
     t.lotNumber === lotNumber && t.status === currentStatus
@@ -416,6 +429,31 @@ export const moveLotInDB = async (
       : t
   );
   setLocalTickets(updated);
+
+  // 2. Lưu lên Supabase
+  if (isSupabaseConfigured()) {
+    try {
+      const ticketsToUpdate = updated.filter(t => t.lotNumber === lotNumber && t.status === newStatus);
+      const rows = ticketsToUpdate.map(mapTicketToRow);
+
+      if (rows.length > 0) {
+        const { error } = await supabase
+          .from('tickets')
+          .upsert(rows, { onConflict: 'id' });
+
+        if (error) {
+          console.warn(`Lỗi upsert khi chuyển lô ${lotNumber}, thử update:`, error.message);
+          await supabase
+            .from('tickets')
+            .update({ status: newStatus, updated_at: updatedAt })
+            .eq('lot_number', lotNumber)
+            .eq('status', currentStatus);
+        }
+      }
+    } catch (err) {
+      console.error('Lỗi ngoại lệ khi move lot:', err);
+    }
+  }
 };
 
 /**
