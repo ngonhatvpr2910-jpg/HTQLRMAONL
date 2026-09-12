@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useTickets } from './TicketContext';
 import { WORKFLOW_STEPS, WorkflowStep, Ticket } from './types';
-import { X, ArrowRight, Save, CheckCircle2, Trash2 } from 'lucide-react';
+import { X, ArrowRight, ArrowLeft, Save, CheckCircle2, Trash2, RotateCcw, QrCode, Truck } from 'lucide-react';
 import { motion } from 'motion/react';
 import { QRCodeSVG } from 'qrcode.react';
 
@@ -11,7 +11,7 @@ interface Props {
 }
 
 export default function TicketDetailModal({ ticketId, onClose }: Props) {
-  const { tickets, updateTicket, deleteTicket } = useTickets();
+  const { tickets, updateTicket, deleteTicket, requestConfirm } = useTickets();
   const ticket = tickets.find(t => t.id === ticketId);
   const [formData, setFormData] = useState<Partial<Ticket>>({});
   const [isConfirmingDelete, setIsConfirmingDelete] = useState(false);
@@ -25,7 +25,27 @@ export default function TicketDetailModal({ ticketId, onClose }: Props) {
   if (!ticket) return null;
 
   const currentStepIndex = WORKFLOW_STEPS.findIndex(s => s.id === ticket.status);
-  const nextStep = WORKFLOW_STEPS[currentStepIndex + 1];
+  
+  let prevStep: typeof WORKFLOW_STEPS[number] | null = null;
+  let nextStep: typeof WORKFLOW_STEPS[number] | null = null;
+
+  if (ticket.status === WorkflowStep.LIQUIDATION) {
+    prevStep = WORKFLOW_STEPS.find(s => s.id === WorkflowStep.QUOTED) || null;
+    nextStep = null;
+  } else if (ticket.status === WorkflowStep.FINISHED) {
+    prevStep = WORKFLOW_STEPS.find(s => s.id === WorkflowStep.REWORK) || null;
+    nextStep = WORKFLOW_STEPS.find(s => s.id === WorkflowStep.SHIPPED) || null;
+  } else if (ticket.status === WorkflowStep.SHIPPED) {
+    prevStep = WORKFLOW_STEPS.find(s => s.id === WorkflowStep.FINISHED) || null;
+    nextStep = null;
+  } else {
+    if (currentStepIndex > 0) {
+      prevStep = WORKFLOW_STEPS[currentStepIndex - 1];
+    }
+    if (currentStepIndex >= 0 && currentStepIndex < WORKFLOW_STEPS.length - 1) {
+      nextStep = WORKFLOW_STEPS[currentStepIndex + 1];
+    }
+  }
 
   const handleUpdate = async () => {
     setIsSaving(true);
@@ -40,23 +60,21 @@ export default function TicketDetailModal({ ticketId, onClose }: Props) {
     }
   };
 
-  const handleMove = async () => {
-    if (nextStep) {
-      setIsSaving(true);
-      try {
-        // Đồng bộ toàn bộ dữ liệu đã chỉnh sửa cùng với trạng thái mới trong 1 thao tác duy nhất
-        const updatedTicketData = {
-          ...formData,
-          status: nextStep.id,
-          updatedAt: new Date().toISOString(),
-        };
-        await updateTicket(ticket.id, updatedTicketData);
-        onClose();
-      } catch (err) {
-        console.error('Lỗi khi chuyển bước:', err);
-      } finally {
-        setIsSaving(false);
-      }
+  const handleMove = async (targetStepId: WorkflowStep) => {
+    setIsSaving(true);
+    try {
+      // Đồng bộ toàn bộ dữ liệu đã chỉnh sửa cùng với trạng thái mới trong 1 thao tác duy nhất
+      const updatedTicketData = {
+        ...formData,
+        status: targetStepId,
+        updatedAt: new Date().toISOString(),
+      };
+      await updateTicket(ticket.id, updatedTicketData);
+      onClose();
+    } catch (err) {
+      console.error('Lỗi khi chuyển bước:', err);
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -140,8 +158,8 @@ export default function TicketDetailModal({ ticketId, onClose }: Props) {
         return (
           <div className="bg-emerald-50 p-6 rounded-lg border border-emerald-100 flex flex-col items-center justify-center text-center">
             <CheckCircle2 className="w-12 h-12 text-emerald-500 mb-3" />
-            <h3 className="text-lg font-bold text-emerald-800">Quy trình hoàn tất</h3>
-            <p className="text-sm text-emerald-600 mt-1">Sản phẩm đã được nhập lại kho xuất hàng để trả về phòng bảo hành.</p>
+            <h3 className="text-lg font-bold text-emerald-800">Đã hoàn thành nhập kho</h3>
+            <p className="text-sm text-emerald-600 mt-1">Sản phẩm đã được nhập lại kho xuất hàng để sẵn sàng xuất trả.</p>
             {ticket.imei && (
               <div className="mt-4 pt-4 border-t border-emerald-100 w-full">
                 <span className="text-[10px] text-emerald-500 uppercase font-bold block">Ghi nhận IMEI</span>
@@ -156,6 +174,20 @@ export default function TicketDetailModal({ ticketId, onClose }: Props) {
             <CheckCircle2 className="w-12 h-12 text-rose-500 mb-3" />
             <h3 className="text-lg font-bold text-rose-800">Đã chuyển trả thanh lý</h3>
             <p className="text-sm text-rose-600 mt-1">Sản phẩm đã được phân loại và chuyển sang kho hàng thanh lý.</p>
+          </div>
+        );
+      case WorkflowStep.SHIPPED:
+        return (
+          <div className="bg-teal-50 p-6 rounded-lg border border-teal-100 flex flex-col items-center justify-center text-center">
+            <Truck className="w-12 h-12 text-teal-600 mb-3" />
+            <h3 className="text-lg font-bold text-teal-800">7. Hàng đã được xuất</h3>
+            <p className="text-sm text-teal-600 mt-1">Sản phẩm đã hoàn tất đóng gói và xuất kho giao trả thành công.</p>
+            {ticket.imei && (
+              <div className="mt-4 pt-4 border-t border-teal-200/60 w-full">
+                <span className="text-[10px] text-teal-600 uppercase font-bold block">Ghi nhận IMEI</span>
+                <span className="text-sm font-mono font-bold text-teal-700">{ticket.imei}</span>
+              </div>
+            )}
           </div>
         );
       default:
@@ -189,22 +221,52 @@ export default function TicketDetailModal({ ticketId, onClose }: Props) {
               <div className="absolute left-0 top-1/2 -translate-y-1/2 w-full h-1 bg-slate-200 -z-10 rounded-full"></div>
               <div 
                 className="absolute left-0 top-1/2 -translate-y-1/2 h-1 bg-blue-500 -z-10 rounded-full transition-all duration-500"
-                style={{ width: `${(currentStepIndex / (WORKFLOW_STEPS.length - 1)) * 100}%` }}
+                style={{ width: `${(Math.max(0, currentStepIndex) / (WORKFLOW_STEPS.length - 1)) * 100}%` }}
               ></div>
               
-              {WORKFLOW_STEPS.map((step, idx) => (
-                <div key={step.id} className="flex flex-col items-center">
-                  <div className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold border-2 
-                    ${idx < currentStepIndex ? 'bg-blue-500 border-blue-500 text-white' : 
-                      idx === currentStepIndex ? 'bg-white border-blue-500 text-blue-600' : 'bg-white border-slate-300 text-slate-400'}`}
+              {WORKFLOW_STEPS.map((step, idx) => {
+                const isCurrent = step.id === ticket.status;
+                const isPast = idx < currentStepIndex && ticket.status !== WorkflowStep.LIQUIDATION;
+                return (
+                  <button 
+                    key={step.id} 
+                    type="button"
+                    onClick={() => {
+                      if (isCurrent || isSaving) return;
+                      // Chặn chuyển thủ công sang bước 5 từ bước 4
+                      if (step.id === WorkflowStep.FINISHED && ticket.status === WorkflowStep.REWORK) {
+                        alert('Bước 5 (Nhập kho) không cho phép chuyển thủ công. Vui lòng quét mã barcode/QR của máy tại cột Bước 5 để xác nhận hoàn thành.');
+                        return;
+                      }
+                      const isBack = idx < currentStepIndex;
+                      const actionType = isBack ? 'trả máy về' : 'chuyển máy sang';
+                      requestConfirm({
+                        title: isBack ? 'Xác nhận trả về bước trước' : 'Xác nhận chuyển bước tiếp theo',
+                        message: `Bạn có chắc chắn muốn ${actionType} bước "${step.fullLabel}"?`,
+                        detail: `Model: ${ticket.productName} | Serial: ${ticket.serialNumber} | Phiếu: ${ticket.id}`,
+                        confirmText: isBack ? 'Xác nhận trả về' : 'Xác nhận chuyển',
+                        cancelText: 'Hủy bỏ',
+                        type: isBack ? 'warning' : 'primary',
+                        onConfirm: async () => {
+                          await handleMove(step.id);
+                        },
+                      });
+                    }}
+                    className={`flex flex-col items-center group focus:outline-none transition-transform ${isCurrent ? 'cursor-default' : 'cursor-pointer hover:scale-105'}`}
+                    title={isCurrent ? `Hiện tại: ${step.fullLabel}` : `Bấm để chuyển sang: ${step.fullLabel}`}
                   >
-                    {idx < currentStepIndex ? '✓' : idx + 1}
-                  </div>
-                  <span className={`text-[10px] mt-2 font-medium max-w-[60px] text-center ${idx <= currentStepIndex ? 'text-slate-700' : 'text-slate-400'}`}>
-                    {step.label}
-                  </span>
-                </div>
-              ))}
+                    <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold border-2 transition-all shadow-xs 
+                      ${isCurrent ? 'bg-blue-600 border-blue-600 text-white ring-4 ring-blue-100 scale-110' : 
+                        isPast ? 'bg-blue-500 border-blue-500 text-white group-hover:bg-blue-600' : 'bg-white border-slate-300 text-slate-500 group-hover:border-blue-400 group-hover:text-blue-600'}`}
+                    >
+                      {isCurrent ? idx + 1 : isPast ? '✓' : idx + 1}
+                    </div>
+                    <span className={`text-[10px] mt-1.5 font-medium max-w-[65px] text-center transition-colors ${isCurrent ? 'text-blue-700 font-bold' : isPast ? 'text-slate-700' : 'text-slate-400 group-hover:text-slate-600'}`}>
+                      {step.label}
+                    </span>
+                  </button>
+                );
+              })}
             </div>
           </div>
 
@@ -265,7 +327,7 @@ export default function TicketDetailModal({ ticketId, onClose }: Props) {
               {renderCurrentStepFields()}
               
               <div className="flex justify-end space-x-3 mt-6 pt-4 border-t border-slate-100">
-                {(ticket.status === WorkflowStep.FINISHED || ticket.status === WorkflowStep.LIQUIDATION) && (
+                {(ticket.status === WorkflowStep.FINISHED || ticket.status === WorkflowStep.LIQUIDATION || ticket.status === WorkflowStep.SHIPPED) && (
                   <div className="mr-auto flex items-center">
                     {!isConfirmingDelete ? (
                       <button 
@@ -295,7 +357,83 @@ export default function TicketDetailModal({ ticketId, onClose }: Props) {
                   </div>
                 )}
                 
+                {prevStep && (
+                  <button 
+                    type="button"
+                    onClick={() => {
+                      requestConfirm({
+                        title: 'Xác nhận trả máy về bước trước',
+                        message: `Bạn có chắc chắn muốn trả máy "${ticket.serialNumber}" về bước "${prevStep.label}"?`,
+                        detail: `Model: ${ticket.productName} | Lô: ${ticket.lotNumber} | Phiếu: ${ticket.id}`,
+                        confirmText: 'Xác nhận trả về',
+                        cancelText: 'Hủy bỏ',
+                        type: 'warning',
+                        onConfirm: async () => {
+                          await handleMove(prevStep.id);
+                        },
+                      });
+                    }}
+                    disabled={isSaving}
+                    className="px-3.5 py-2 bg-amber-50 hover:bg-amber-100 border border-amber-300 text-amber-900 font-medium rounded-lg transition-colors shadow-xs flex items-center space-x-1.5 disabled:opacity-50"
+                    title={`Quay lại: ${prevStep.fullLabel}`}
+                  >
+                    <ArrowLeft className="w-4 h-4 text-amber-600" />
+                    <span>{isSaving ? 'Đang xử lý...' : `Quay lại: ${prevStep.label}`}</span>
+                  </button>
+                )}
+
+                {ticket.status === WorkflowStep.QUOTED && (
+                  <button 
+                    type="button"
+                    onClick={() => {
+                      requestConfirm({
+                        title: 'Xác nhận thanh lý máy',
+                        message: `Bạn có chắc muốn chuyển máy "${ticket.serialNumber}" sang bước Thanh lý?`,
+                        detail: `Model: ${ticket.productName} | Lô: ${ticket.lotNumber} | Phiếu: ${ticket.id}`,
+                        confirmText: 'Thanh lý máy',
+                        cancelText: 'Hủy bỏ',
+                        type: 'danger',
+                        onConfirm: async () => {
+                          await handleMove(WorkflowStep.LIQUIDATION);
+                        },
+                      });
+                    }}
+                    disabled={isSaving}
+                    className="px-3.5 py-2 bg-rose-50 hover:bg-rose-100 border border-rose-300 text-rose-800 font-medium rounded-lg transition-colors shadow-xs flex items-center space-x-1.5 disabled:opacity-50"
+                    title="Chuyển sang 6. Thanh lý do báo giá cao"
+                  >
+                    <span>Thanh lý máy</span>
+                    <ArrowRight className="w-4 h-4 text-rose-600" />
+                  </button>
+                )}
+
+                {ticket.status === WorkflowStep.LIQUIDATION && (
+                  <button 
+                    type="button"
+                    onClick={() => {
+                      requestConfirm({
+                        title: 'Xác nhận phục hồi máy',
+                        message: `Bạn có chắc muốn phục hồi máy "${ticket.serialNumber}" về bước "3. Đã báo giá"?`,
+                        detail: `Model: ${ticket.productName} | Lô: ${ticket.lotNumber} | Phiếu: ${ticket.id}`,
+                        confirmText: 'Phục hồi',
+                        cancelText: 'Hủy bỏ',
+                        type: 'warning',
+                        onConfirm: async () => {
+                          await handleMove(WorkflowStep.QUOTED);
+                        },
+                      });
+                    }}
+                    disabled={isSaving}
+                    className="px-3.5 py-2 bg-indigo-50 hover:bg-indigo-100 border border-indigo-300 text-indigo-900 font-medium rounded-lg transition-colors shadow-xs flex items-center space-x-1.5 disabled:opacity-50"
+                    title="Phục hồi về 3. Đã báo giá"
+                  >
+                    <RotateCcw className="w-4 h-4 text-indigo-600" />
+                    <span>{isSaving ? 'Đang xử lý...' : 'Phục hồi: 3. Báo giá'}</span>
+                  </button>
+                )}
+                
                 <button 
+                  type="button"
                   onClick={handleUpdate}
                   disabled={isSaving}
                   className="px-4 py-2 text-slate-600 font-medium hover:bg-slate-100 rounded-lg transition-colors flex items-center space-x-2 disabled:opacity-50"
@@ -314,14 +452,37 @@ export default function TicketDetailModal({ ticketId, onClose }: Props) {
                 </button>
                 
                 {nextStep && (
-                  <button 
-                    onClick={handleMove}
-                    disabled={isSaving}
-                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white font-medium rounded-lg transition-colors shadow-sm flex items-center space-x-2"
-                  >
-                    <span>{isSaving ? 'Đang xử lý...' : `Chuyển: ${nextStep.label}`}</span>
-                    <ArrowRight className="w-4 h-4" />
-                  </button>
+                  nextStep.id === WorkflowStep.FINISHED ? (
+                    <div 
+                      className="px-3.5 py-2 bg-slate-100 border border-slate-200 text-slate-600 font-medium rounded-lg text-xs flex items-center space-x-1.5 shadow-2xs"
+                      title="Chuyển bước 5 thủ công đã được tắt. Vui lòng quét mã (barcode/QR) của máy tại Cột 5 để xác nhận hoàn thành."
+                    >
+                      <QrCode className="w-4 h-4 text-blue-600 shrink-0" />
+                      <span>Quét mã tại B5 để hoàn thành</span>
+                    </div>
+                  ) : (
+                    <button 
+                      type="button"
+                      onClick={() => {
+                        requestConfirm({
+                          title: 'Xác nhận chuyển máy sang bước tiếp theo',
+                          message: `Bạn có chắc chắn muốn chuyển máy "${ticket.serialNumber}" sang bước "${nextStep.label}"?`,
+                          detail: `Model: ${ticket.productName} | Lô: ${ticket.lotNumber} | Phiếu: ${ticket.id}`,
+                          confirmText: 'Xác nhận chuyển',
+                          cancelText: 'Hủy bỏ',
+                          type: 'primary',
+                          onConfirm: async () => {
+                            await handleMove(nextStep.id);
+                          },
+                        });
+                      }}
+                      disabled={isSaving}
+                      className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white font-medium rounded-lg transition-colors shadow-sm flex items-center space-x-2"
+                    >
+                      <span>{isSaving ? 'Đang xử lý...' : `Chuyển: ${nextStep.label}`}</span>
+                      <ArrowRight className="w-4 h-4" />
+                    </button>
+                  )
                 )}
               </div>
             </div>

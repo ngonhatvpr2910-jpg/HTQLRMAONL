@@ -1,7 +1,7 @@
 import React from 'react';
 import { useTickets } from './TicketContext';
 import { WORKFLOW_STEPS, WorkflowStep } from './types';
-import { X, ArrowRight, Edit, CheckCircle2 } from 'lucide-react';
+import { X, ArrowRight, ArrowLeft, Edit, CheckCircle2 } from 'lucide-react';
 import { motion } from 'motion/react';
 
 interface Props {
@@ -11,19 +11,66 @@ interface Props {
 }
 
 export default function ScanActionModal({ ticketId, onClose, onOpenDetail }: Props) {
-  const { tickets, moveTicket } = useTickets();
+  const { tickets, moveTicket, requestConfirm } = useTickets();
   const ticket = tickets.find(t => t.id === ticketId);
 
   if (!ticket) return null;
 
   const currentStepIndex = WORKFLOW_STEPS.findIndex(s => s.id === ticket.status);
-  const nextStep = WORKFLOW_STEPS[currentStepIndex + 1];
+  
+  let prevStep: typeof WORKFLOW_STEPS[number] | null = null;
+  let nextStep: typeof WORKFLOW_STEPS[number] | null = null;
+
+  if (ticket.status === WorkflowStep.LIQUIDATION) {
+    prevStep = WORKFLOW_STEPS.find(s => s.id === WorkflowStep.QUOTED) || null;
+    nextStep = null;
+  } else if (ticket.status === WorkflowStep.FINISHED) {
+    prevStep = WORKFLOW_STEPS.find(s => s.id === WorkflowStep.REWORK) || null;
+    nextStep = WORKFLOW_STEPS.find(s => s.id === WorkflowStep.SHIPPED) || null;
+  } else if (ticket.status === WorkflowStep.SHIPPED) {
+    prevStep = WORKFLOW_STEPS.find(s => s.id === WorkflowStep.FINISHED) || null;
+    nextStep = null;
+  } else {
+    if (currentStepIndex > 0) {
+      prevStep = WORKFLOW_STEPS[currentStepIndex - 1];
+    }
+    if (currentStepIndex >= 0 && currentStepIndex < WORKFLOW_STEPS.length - 1) {
+      nextStep = WORKFLOW_STEPS[currentStepIndex + 1];
+    }
+  }
   const currentStepLabel = WORKFLOW_STEPS[currentStepIndex]?.label;
 
   const handleAdvance = () => {
     if (nextStep) {
-      moveTicket(ticket.id, nextStep.id);
-      onClose();
+      requestConfirm({
+        title: 'Xác nhận chuyển bước tiếp theo',
+        message: `Bạn có chắc chắn muốn chuyển máy "${ticket.serialNumber}" sang bước "${nextStep.label}"?`,
+        detail: `Model: ${ticket.productName} | Lô: ${ticket.lotNumber} | Phiếu: ${ticket.id}`,
+        confirmText: 'Xác nhận chuyển',
+        cancelText: 'Hủy bỏ',
+        type: 'primary',
+        onConfirm: async () => {
+          await moveTicket(ticket.id, nextStep.id);
+          onClose();
+        },
+      });
+    }
+  };
+
+  const handleBack = () => {
+    if (prevStep) {
+      requestConfirm({
+        title: 'Xác nhận trả về bước trước',
+        message: `Bạn có chắc chắn muốn trả máy "${ticket.serialNumber}" về bước "${prevStep.label}"?`,
+        detail: `Model: ${ticket.productName} | Lô: ${ticket.lotNumber} | Phiếu: ${ticket.id}`,
+        confirmText: 'Xác nhận trả về',
+        cancelText: 'Hủy bỏ',
+        type: 'warning',
+        onConfirm: async () => {
+          await moveTicket(ticket.id, prevStep.id);
+          onClose();
+        },
+      });
     }
   };
 
@@ -38,7 +85,11 @@ export default function ScanActionModal({ ticketId, onClose, onOpenDetail }: Pro
       case WorkflowStep.REWORK:
         return 'Xác nhận nhập kho';
       case WorkflowStep.FINISHED:
-        return 'Sản phẩm đã hoàn thành nhập kho';
+        return 'Xác nhận xuất hàng';
+      case WorkflowStep.SHIPPED:
+        return 'Hàng đã được xuất thành công';
+      case WorkflowStep.LIQUIDATION:
+        return 'Hàng đã chuyển thanh lý';
       default:
         return 'Chuyển sang bước tiếp theo';
     }
@@ -86,7 +137,7 @@ export default function ScanActionModal({ ticketId, onClose, onOpenDetail }: Pro
           </div>
 
           <div className="space-y-3">
-            {nextStep ? (
+            {nextStep && (
               <button 
                 onClick={handleAdvance}
                 className="w-full flex items-center justify-center space-x-2 bg-blue-600 hover:bg-blue-700 text-white font-medium py-3 rounded-lg transition-colors shadow-sm"
@@ -94,7 +145,19 @@ export default function ScanActionModal({ ticketId, onClose, onOpenDetail }: Pro
                 <CheckCircle2 className="w-5 h-5" />
                 <span>{getActionText()}</span>
               </button>
-            ) : (
+            )}
+
+            {prevStep && (
+              <button 
+                onClick={handleBack}
+                className="w-full flex items-center justify-center space-x-2 bg-amber-50 hover:bg-amber-100 border border-amber-300 text-amber-900 font-medium py-2.5 rounded-lg transition-colors shadow-xs"
+              >
+                <ArrowLeft className="w-4 h-4 text-amber-600" />
+                <span>Quay lại bước: {prevStep.label}</span>
+              </button>
+            )}
+
+            {!nextStep && (
               <div className="w-full flex items-center justify-center space-x-2 bg-emerald-100 text-emerald-700 font-medium py-3 rounded-lg">
                 <CheckCircle2 className="w-5 h-5" />
                 <span>{getActionText()}</span>

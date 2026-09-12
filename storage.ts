@@ -119,6 +119,20 @@ export const setLocalLots = (lots: LotInfo[]) => {
 
 // ================= Ánh xạ 2 chiều DB (snake_case) <-> Frontend (camelCase) =================
 export const mapRowToTicket = (row: any): Ticket => {
+  let status = (row.status as WorkflowStep) || WorkflowStep.RMA_IN;
+  const rawLoc = row.return_location ?? row.returnLocation ?? '';
+  let returnLocation: string | undefined = undefined;
+
+  if (typeof rawLoc === 'string') {
+    if (rawLoc.includes('[SHIPPED]') || row.status === 'SHIPPED') {
+      status = WorkflowStep.SHIPPED;
+      const clean = rawLoc.replace(/\[SHIPPED\]\s*/g, '').trim();
+      returnLocation = clean || undefined;
+    } else {
+      returnLocation = rawLoc.trim() || undefined;
+    }
+  }
+
   return {
     id: row.id,
     productName: row.product_name ?? row.productName ?? '',
@@ -127,7 +141,7 @@ export const mapRowToTicket = (row: any): Ticket => {
     serialNumber: row.serial_number ?? row.serialNumber ?? '',
     quantity: Number(row.quantity ?? 1),
     issueDescription: row.issue_description ?? row.issueDescription ?? '',
-    status: (row.status as WorkflowStep) || WorkflowStep.RMA_IN,
+    status,
     createdAt: row.created_at ?? row.createdAt ?? new Date().toISOString(),
     updatedAt: row.updated_at ?? row.updatedAt ?? new Date().toISOString(),
     imei: row.imei ?? undefined,
@@ -139,7 +153,7 @@ export const mapRowToTicket = (row: any): Ticket => {
       : undefined,
     quotationAmount: row.quotation_amount !== undefined ? Number(row.quotation_amount) : (row.quotationAmount !== undefined ? Number(row.quotationAmount) : undefined),
     reworkNotes: row.rework_notes ?? row.reworkNotes ?? undefined,
-    returnLocation: row.return_location ?? row.returnLocation ?? undefined,
+    returnLocation,
   };
 };
 
@@ -152,7 +166,26 @@ export const mapTicketToRow = (ticket: Partial<Ticket>): any => {
   if (ticket.serialNumber !== undefined) row.serial_number = ticket.serialNumber;
   if (ticket.quantity !== undefined) row.quantity = ticket.quantity;
   if (ticket.issueDescription !== undefined) row.issue_description = ticket.issueDescription;
-  if (ticket.status !== undefined) row.status = ticket.status;
+
+  if (ticket.status !== undefined) {
+    if (ticket.status === WorkflowStep.SHIPPED) {
+      // Postgres check constraint "tickets_status_check" chỉ cho phép ('RMA_IN', 'EVALUATION', 'QUOTED', 'REWORK', 'FINISHED', 'LIQUIDATION')
+      // Lưu trạng thái FINISHED và đánh dấu [SHIPPED] trong return_location để không vi phạm constraint DB
+      row.status = 'FINISHED';
+      const loc = (ticket.returnLocation || '').replace(/\[SHIPPED\]\s*/g, '').trim();
+      row.return_location = loc ? `[SHIPPED] ${loc}` : '[SHIPPED]';
+    } else {
+      row.status = ticket.status;
+      if (ticket.returnLocation !== undefined) {
+        const cleanLoc = (ticket.returnLocation || '').replace(/\[SHIPPED\]\s*/g, '').trim();
+        row.return_location = cleanLoc || null;
+      }
+    }
+  } else if (ticket.returnLocation !== undefined) {
+    const cleanLoc = (ticket.returnLocation || '').replace(/\[SHIPPED\]\s*/g, '').trim();
+    row.return_location = cleanLoc || null;
+  }
+
   if (ticket.createdAt !== undefined) row.created_at = ticket.createdAt;
   if (ticket.updatedAt !== undefined) row.updated_at = ticket.updatedAt;
   if (ticket.imei !== undefined) row.imei = ticket.imei;
@@ -160,7 +193,6 @@ export const mapTicketToRow = (ticket: Partial<Ticket>): any => {
   if (ticket.damagedParts !== undefined) row.damaged_parts = ticket.damagedParts;
   if (ticket.quotationAmount !== undefined) row.quotation_amount = ticket.quotationAmount;
   if (ticket.reworkNotes !== undefined) row.rework_notes = ticket.reworkNotes;
-  if (ticket.returnLocation !== undefined) row.return_location = ticket.returnLocation;
   return row;
 };
 
@@ -380,19 +412,31 @@ export const updateTicketInDB = async (
   // 2. Lưu lên Supabase
   if (isSupabaseConfigured()) {
     try {
-      const row = mapTicketToRow(updatedTicket);
-      const { error } = await supabase
+      // Ưu tiên update trực tiếp trường thay đổi (tránh lỗi Not-Null của upsert khi phiếu thiếu cột khác)
+      const updateRow = mapTicketToRow(fullUpdates);
+      const { data, error } = await supabase
         .from('tickets')
-        .upsert([row], { onConflict: 'id' });
+        .update(updateRow)
+        .eq('id', id)
+        .select('id');
 
       if (error) {
-        console.warn(`Lỗi upsert phiếu ${id} trên Supabase, thử fallback update:`, error.message);
-        const { error: updateErr } = await supabase
+        console.warn(`Lỗi update phiếu ${id} trên Supabase, thử fallback upsert:`, error.message);
+        const fullRow = mapTicketToRow(updatedTicket);
+        const { error: upsertErr } = await supabase
           .from('tickets')
-          .update(mapTicketToRow(fullUpdates))
-          .eq('id', id);
-        if (updateErr) {
-          console.error(`Lỗi update fallback phiếu ${id}:`, updateErr.message);
+          .upsert([fullRow], { onConflict: 'id' });
+        if (upsertErr) {
+          console.error(`Lỗi upsert fallback phiếu ${id}:`, upsertErr.message);
+        }
+      } else if (!data || data.length === 0) {
+        // Trường hợp phiếu mới chưa có trong database, thực hiện upsert với toàn bộ thông tin
+        const fullRow = mapTicketToRow(updatedTicket);
+        const { error: insertErr } = await supabase
+          .from('tickets')
+          .upsert([fullRow], { onConflict: 'id' });
+        if (insertErr) {
+          console.error(`Lỗi tạo mới phiếu ${id} qua upsert:`, insertErr.message);
         }
       }
     } catch (err) {
@@ -443,11 +487,23 @@ export const moveLotInDB = async (
 
         if (error) {
           console.warn(`Lỗi upsert khi chuyển lô ${lotNumber}, thử update:`, error.message);
-          await supabase
-            .from('tickets')
-            .update({ status: newStatus, updated_at: updatedAt })
-            .eq('lot_number', lotNumber)
-            .eq('status', currentStatus);
+          const dbNewStatus = newStatus === WorkflowStep.SHIPPED ? 'FINISHED' : newStatus;
+          const updatePayload: any = { status: dbNewStatus, updated_at: updatedAt };
+          if (newStatus === WorkflowStep.SHIPPED) {
+            updatePayload.return_location = '[SHIPPED]';
+          } else if (newStatus === WorkflowStep.FINISHED) {
+            updatePayload.return_location = null;
+          }
+          let query = supabase.from('tickets').update(updatePayload).eq('lot_number', lotNumber);
+          if (currentStatus === WorkflowStep.SHIPPED) {
+            query = query.eq('status', 'FINISHED').like('return_location', '%[SHIPPED]%');
+          } else {
+            query = query.eq('status', currentStatus);
+          }
+          const { error: updateErr } = await query;
+          if (updateErr) {
+            console.error(`Lỗi update fallback chuyển lô ${lotNumber}:`, updateErr.message);
+          }
         }
       }
     } catch (err) {
@@ -527,6 +583,9 @@ export const normalizeWorkflowStatus = (raw: any): WorkflowStep => {
   }
   if (str === 'LIQUIDATION' || str === '6' || str.includes('THANH LÝ') || str.includes('THANH LY')) {
     return WorkflowStep.LIQUIDATION;
+  }
+  if (str === 'SHIPPED' || str === '7' || str.includes('ĐÃ XUẤT') || str.includes('DA XUAT') || str.includes('XUẤT HÀNG') || str.includes('XUAT HANG') || str.includes('ĐƯỢC XUẤT') || str.includes('DUOC XUAT')) {
+    return WorkflowStep.SHIPPED;
   }
 
   return WorkflowStep.RMA_IN;

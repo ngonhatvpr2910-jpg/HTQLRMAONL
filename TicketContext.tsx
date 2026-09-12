@@ -14,6 +14,7 @@ import {
   subscribeToRealtimeChanges,
 } from './storage';
 import { isSupabaseConfigured } from './supabaseClient';
+import { ConfirmModal, ConfirmDialogOptions } from './ConfirmModal';
 
 interface TicketContextType {
   tickets: Ticket[];
@@ -30,6 +31,7 @@ interface TicketContextType {
   moveTicket: (id: string, newStatus: WorkflowStep) => Promise<void>;
   moveLot: (lotNumber: string, currentStatus: WorkflowStep, newStatus: WorkflowStep) => Promise<void>;
   deleteTicket: (id: string) => Promise<void>;
+  requestConfirm: (options: ConfirmDialogOptions) => void;
   importData: (data: {
     tickets?: Ticket[];
     lots?: LotInfo[];
@@ -46,7 +48,12 @@ export const TicketProvider: React.FC<{ children: ReactNode }> = ({ children }) 
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const [confirmOptions, setConfirmOptions] = useState<ConfirmDialogOptions | null>(null);
   const isSupabaseOnline = isSupabaseConfigured();
+
+  const requestConfirm = useCallback((options: ConfirmDialogOptions) => {
+    setConfirmOptions(options);
+  }, []);
 
   // Hàm tải toàn bộ dữ liệu từ storage (Supabase hoặc offline fallback)
   const refreshData = useCallback(async () => {
@@ -303,10 +310,12 @@ export const TicketProvider: React.FC<{ children: ReactNode }> = ({ children }) 
         moveTicket,
         moveLot,
         deleteTicket,
+        requestConfirm,
         importData,
       }}
     >
       {children}
+      <ConfirmModal options={confirmOptions} onClose={() => setConfirmOptions(null)} />
     </TicketContext.Provider>
   );
 };

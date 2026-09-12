@@ -14,9 +14,9 @@ import { createClient, SupabaseClient } from '@supabase/supabase-js';
 const DEFAULT_SUPABASE_URL = 'https://ceucxnrwzeaafqspdjyi.supabase.co';
 const DEFAULT_SUPABASE_ANON_KEY = 'sb_publishable_aFb2LCHTTx6Ic4EdWLQfKw_SG6bpSOu';
 
-// Đọc từ biến môi trường của Vite
-const envUrl = import.meta.env.VITE_SUPABASE_URL;
-const envKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+// Đọc từ biến môi trường của Vite (hỗ trợ an toàn cả môi trường Node và Vite)
+const envUrl = typeof import.meta !== 'undefined' && import.meta?.env ? import.meta.env.VITE_SUPABASE_URL : process?.env?.VITE_SUPABASE_URL;
+const envKey = typeof import.meta !== 'undefined' && import.meta?.env ? import.meta.env.VITE_SUPABASE_ANON_KEY : process?.env?.VITE_SUPABASE_ANON_KEY;
 
 // Kiểm tra và bảo đảm URL là địa chỉ tuyệt đối trực tiếp của Supabase
 const resolveDirectSupabaseUrl = (url: string | undefined): string => {

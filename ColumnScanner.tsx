@@ -93,20 +93,35 @@ export default function ColumnScanner({ stepId }: Props) {
         WorkflowStep.QUOTED,
         WorkflowStep.REWORK,
         WorkflowStep.FINISHED,
-        WorkflowStep.LIQUIDATION
+        WorkflowStep.LIQUIDATION,
+        WorkflowStep.SHIPPED,
       ];
 
       const currentIndex = STEP_SEQUENCE.indexOf(foundTicket.status);
       const targetIndex = STEP_SEQUENCE.indexOf(stepId);
 
-      // Block moving back to Step 1 if already at Step 2 or further
-      if (stepId === WorkflowStep.RMA_IN && currentIndex >= 1) {
-        alert(`Sản phẩm [${foundTicket.serialNumber}] đã qua bước Đánh giá, không thể quay lại bước Nhập RMA.`);
+      // If already at this step
+      if (currentIndex === targetIndex) {
+        alert(`Sản phẩm [${foundTicket.serialNumber}] hiện đã ở bước này.`);
         setInputValue('');
         return;
       }
 
-      if (targetIndex > currentIndex + 1) {
+      // Allow returning to previous steps (e.g., Step 2 back to Step 1, Step 3 back to Step 2, Step 7 back to Step 5, etc.)
+      if (targetIndex < currentIndex) {
+        moveTicket(foundTicket.id, stepId);
+        setInputValue('');
+        return;
+      }
+
+      // Allow skipping from QUOTED (index 2) directly to LIQUIDATION (index 5)
+      const isQuotedToLiquidation = foundTicket.status === WorkflowStep.QUOTED && stepId === WorkflowStep.LIQUIDATION;
+      // Allow advancing from FINISHED (index 4) directly to SHIPPED (index 6)
+      const isFinishedToShipped = foundTicket.status === WorkflowStep.FINISHED && stepId === WorkflowStep.SHIPPED;
+      // Allow advancing from LIQUIDATION (index 5) directly to SHIPPED (index 6)
+      const isLiquidationToShipped = foundTicket.status === WorkflowStep.LIQUIDATION && stepId === WorkflowStep.SHIPPED;
+
+      if (targetIndex > currentIndex + 1 && !isQuotedToLiquidation && !isFinishedToShipped && !isLiquidationToShipped) {
         const nextStepLabel = STEP_SEQUENCE[currentIndex + 1];
         // Find label for the missing step
         const missingStep = WORKFLOW_STEPS.find(s => s.id === STEP_SEQUENCE[currentIndex + 1]);
@@ -129,15 +144,22 @@ export default function ColumnScanner({ stepId }: Props) {
     setInputValue('');
   };
 
+  const pendingTicket = pendingTicketId ? tickets.find(t => t.id === pendingTicketId) : null;
+
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter' && inputValue.trim()) {
-      processScan(inputValue.trim());
+    if (e.key === 'Enter') {
+      if (inputValue.trim()) {
+        processScan(inputValue.trim());
+      } else if (pendingTicketId && stepId === WorkflowStep.FINISHED) {
+        updateTicket(pendingTicketId, { status: WorkflowStep.FINISHED });
+        setPendingTicketId(null);
+      }
     }
   };
 
   const getPlaceholder = () => {
-    if (pendingTicketId && stepId === WorkflowStep.FINISHED) {
-      return "Quét mã IMEI máy...";
+    if (pendingTicket && stepId === WorkflowStep.FINISHED) {
+      return `Quét IMEI ${pendingTicket.serialNumber} (hoặc Enter để xong)...`;
     }
     return "Quét mã vào đây...";
   };
@@ -158,10 +180,27 @@ export default function ColumnScanner({ stepId }: Props) {
             className={`w-full pl-8 pr-3 py-1.5 bg-white border ${pendingTicketId ? 'border-blue-500 ring-1 ring-blue-500' : 'border-slate-300'} rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-shadow shadow-sm`}
           />
           {pendingTicketId && (
-            <div className="absolute inset-y-0 right-0 pr-2 flex items-center">
+            <div className="absolute inset-y-0 right-0 pr-1.5 flex items-center space-x-1">
               <button 
-                onClick={() => setPendingTicketId(null)}
-                className="text-[10px] text-slate-400 hover:text-slate-600 bg-slate-100 px-1 rounded"
+                type="button"
+                onClick={() => {
+                  updateTicket(pendingTicketId, { status: WorkflowStep.FINISHED });
+                  setPendingTicketId(null);
+                  setInputValue('');
+                }}
+                className="text-[10px] text-emerald-700 hover:text-emerald-800 bg-emerald-100 hover:bg-emerald-200 border border-emerald-300 px-1.5 py-0.5 rounded font-bold transition-colors"
+                title="Xác nhận hoàn thành nhập kho (không cần IMEI)"
+              >
+                Xác nhận
+              </button>
+              <button 
+                type="button"
+                onClick={() => {
+                  setPendingTicketId(null);
+                  setInputValue('');
+                }}
+                className="text-[10px] text-slate-400 hover:text-slate-600 bg-slate-100 px-1 py-0.5 rounded"
+                title="Hủy thao tác"
               >
                 Hủy
               </button>

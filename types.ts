@@ -12,6 +12,7 @@ export enum WorkflowStep {
   REWORK = 'REWORK',
   FINISHED = 'FINISHED',
   LIQUIDATION = 'LIQUIDATION',
+  SHIPPED = 'SHIPPED',
 }
 
 export const WORKFLOW_STEPS = [
@@ -19,8 +20,9 @@ export const WORKFLOW_STEPS = [
   { id: WorkflowStep.EVALUATION, label: '2. Đánh giá', fullLabel: '2. Đánh giá vật tư hư hỏng' },
   { id: WorkflowStep.QUOTED, label: '3. Đã báo giá', fullLabel: '3. Đã báo giá' },
   { id: WorkflowStep.REWORK, label: '4. Sản xuất', fullLabel: '4. Kéo hàng & Sản xuất Rework' },
-  { id: WorkflowStep.FINISHED, label: '5. Nhập kho', fullLabel: '5. Nhập kho & Xuất trả' },
+  { id: WorkflowStep.FINISHED, label: '5. Nhập kho', fullLabel: '5. Nhập kho & Hoàn thành' },
   { id: WorkflowStep.LIQUIDATION, label: '6. Thanh lý', fullLabel: '6. Chuyển trả thanh lý' },
+  { id: WorkflowStep.SHIPPED, label: '7. Đã xuất', fullLabel: '7. Hàng đã được xuất' },
 ];
 
 export interface Ticket {
@@ -48,6 +50,10 @@ export interface Ticket {
   
   // Step 5: Finished
   returnLocation?: string;
+
+  // Step 7: Shipped
+  shippedDate?: string;
+  shippingNotes?: string;
 }
 
 export interface Worker {
